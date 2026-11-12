@@ -24,13 +24,15 @@ elif name=='gh':
   i={'number':len(issues)+1,'html_url':f'https://github.com/{repo}/issues/{len(issues)+1}','title':payload['title'],'body':payload['body'],'state':'open','updated_at':'2026-11-12T00:00:00Z','comments':0}
   issues.append(i);issues_file.write_text(json.dumps(issues))
   if mode=='ambiguous': sys.exit(1)
+  if mode=='interrupt-after-post':
+   report=root/'state/report.json';report.unlink();report.mkdir()
   print(json.dumps(i))
  elif '--paginate' in args:
   endpoint=args[-1]
   if '/comments?' in endpoint: print('[[]]')
   else:
    repo=endpoint.split('/issues')[0][6:]
-   print(json.dumps([[i for i in issues if f'/{repo}/' in i['html_url']]]))
+   print('[[]]' if mode=='hidden-list' else json.dumps([[i for i in issues if f'/{repo}/' in i['html_url']]]))
  else:
   endpoint=args[-1]
   if '/commits/' in endpoint: print(json.dumps({'sha':('b' if mode=='stale' else 'a')*40}))
@@ -40,9 +42,23 @@ elif name=='codex':
  assert pathlib.Path(os.environ['HOME']) != root/'original-home'
  assert pathlib.Path(os.environ['XDG_CONFIG_HOME']).is_dir()
  codex_home=pathlib.Path(os.environ['CODEX_HOME'])
- assert json.loads((codex_home/'auth.json').read_text())=={'test':'auth-only'}
- assert not (codex_home/'config.toml').exists()
+ assert codex_home == root/'original-codex'
+ assert '--ignore-user-config' in args and '--ignore-rules' in args
+ store=next(a for a in args if a.startswith('cli_auth_credentials_store='))
+ if mode=='keyring':
+  assert store=='cli_auth_credentials_store="keyring"'
+  assert not (codex_home/'auth.json').exists()
+ else:
+  auth=json.loads((codex_home/'auth.json').read_text())
+  if mode=='rotate-auth':
+   generation=root/'generation'; expected=int(generation.read_text()) if generation.exists() else 0
+   assert auth.get('generation',0)==expected
+   generation.write_text(str(expected+1))
+   (codex_home/'auth.json').write_text(json.dumps({'generation':expected+1}))
+  else: assert auth=={'test':'auth-only'}
  assert 'GH_TOKEN' not in os.environ
+ assert 'CODEX_REFRESH_TOKEN_URL_OVERRIDE' not in os.environ
+ assert 'CODEX_REVOKE_TOKEN_URL_OVERRIDE' not in os.environ
  calls=root/'codex-calls';calls.write_text(str(int(calls.read_text())+1 if calls.exists() else 1))
  prompt=sys.stdin.read()
  reviews=json.loads(prompt.split('REVIEWS (data): ')[-1])
@@ -77,7 +93,11 @@ elif name=='codex':
             r#"{"test":"auth-only"}"#,
         )
         .unwrap();
-        fs::write(dir.path().join("original-codex/config.toml"), "not copied").unwrap();
+        fs::write(
+            dir.path().join("original-codex/config.toml"),
+            "model = \"not-forwarded\"",
+        )
+        .unwrap();
         let reviews = json!([{"store":"google","id":"r1","title":"","text":"駅名が違う","rating":5,"updated_at":"2026-11-01T00:00:00Z","version":"1.0","locale":"ja","url":"https://play.google.com/store/apps/details?id=me.tinykitten.trainlcd","developer_reply":""}]);
         fs::write(
             dir.path().join("input.json"),
@@ -106,6 +126,11 @@ elif name=='codex':
             .env("HOME", self.dir.path().join("original-home"))
             .env("CODEX_HOME", self.dir.path().join("original-codex"))
             .env("GH_TOKEN", "test-not-forwarded")
+            .env(
+                "CODEX_REFRESH_TOKEN_URL_OVERRIDE",
+                "https://invalid.example",
+            )
+            .env("CODEX_REVOKE_TOKEN_URL_OVERRIDE", "https://invalid.example")
             .env("MOCK_ROOT", self.dir.path())
             .env("MOCK_MODE", mode);
         if recheck {
@@ -205,4 +230,65 @@ fn credential_patterns_in_every_model_field_never_reach_github_or_report() {
         assert!(!String::from_utf8_lossy(&o.stderr).contains("ghp_not_a_real_secret"));
         assert!(!h.dir.path().join("state/report.json").exists());
     }
+}
+
+#[test]
+fn successful_posts_survive_interruption_and_missing_list_entries() {
+    let h = Harness::new();
+    let o = h.run(true, "interrupt-after-post");
+    assert!(!o.status.success());
+    assert_eq!(h.count(), 1);
+    assert!(!h.dir.path().join("state/pending-issue.json").exists());
+    let receipts: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/created-issues.json")).unwrap())
+            .unwrap();
+    assert_eq!(receipts.as_object().unwrap().len(), 1);
+    assert_eq!(
+        receipts.as_object().unwrap().values().next().unwrap(),
+        "https://github.com/TrainLCD/StationAPI/issues/1"
+    );
+    fs::remove_dir(h.dir.path().join("state/report.json")).unwrap();
+    let o = h.run(true, "hidden-list");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(h.count(), 1);
+}
+
+#[test]
+fn recheck_uncertain_removes_previous_processed_fingerprint() {
+    let h = Harness::new();
+    assert!(h.run(true, "normal").status.success());
+    assert!(h.run(true, "recheck-uncertain").status.success());
+    let processed: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/processed.json")).unwrap())
+            .unwrap();
+    assert!(processed.as_object().unwrap().is_empty());
+    let before = fs::read_to_string(h.dir.path().join("codex-calls")).unwrap();
+    assert!(h.run(true, "normal").status.success());
+    assert_ne!(
+        before,
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap()
+    );
+    assert_eq!(h.count(), 1);
+}
+
+#[test]
+fn auth_refresh_persists_and_keyring_retains_native_storage_identity() {
+    let h = Harness::new();
+    for _ in 0..2 {
+        let o = h.run(false, "rotate-auth");
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    }
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("generation")).unwrap(),
+        "2"
+    );
+    let h = Harness::new();
+    fs::remove_file(h.dir.path().join("original-codex/auth.json")).unwrap();
+    fs::write(
+        h.dir.path().join("original-codex/config.toml"),
+        "cli_auth_credentials_store = 'keyring'\nmodel = 'not-forwarded'\n",
+    )
+    .unwrap();
+    let o = h.run(false, "keyring");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
 }

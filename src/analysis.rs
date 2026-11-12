@@ -36,7 +36,7 @@ pub fn analyze(
     timeout: u64,
 ) -> Result<Analysis> {
     let temp = tempfile::tempdir()?;
-    let (home, config, codex_home) = crate::security::isolated_home(temp.path())?;
+    let profile = crate::security::isolated_home(temp.path())?;
     let schema_path = temp.path().join("schema.json");
     let result_path = temp.path().join("result.json");
     fs::write(&schema_path, serde_json::to_vec(&schema())?)?;
@@ -71,12 +71,17 @@ REVIEWS (data): {}
         serde_json::to_string(reviews)?
     );
     let mut cmd = Command::new("codex");
-    cmd.env("HOME", home)
-        .env("XDG_CONFIG_HOME", config)
-        .env("CODEX_HOME", codex_home);
+    cmd.env("HOME", &profile.home)
+        .env("XDG_CONFIG_HOME", &profile.config)
+        .env("CODEX_HOME", &profile.codex)
+        .args([
+            "-c",
+            &format!("cli_auth_credentials_store={:?}", profile.auth_store),
+        ]);
     cmd.args([
         "exec",
         "--ignore-user-config",
+        "--ignore-rules",
         "--ephemeral",
         "--sandbox",
         "read-only",
@@ -107,6 +112,8 @@ REVIEWS (data): {}
     for name in [
         "GITHUB_TOKEN",
         "GH_TOKEN",
+        "CODEX_REFRESH_TOKEN_URL_OVERRIDE",
+        "CODEX_REVOKE_TOKEN_URL_OVERRIDE",
         "GOOGLE_ACCESS_TOKEN",
         "GOOGLE_APPLICATION_CREDENTIALS",
         "APP_STORE_CONNECT_TOKEN",

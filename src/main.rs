@@ -78,6 +78,8 @@ fn atomic_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
     tmp.write_all(b"\n")?;
     tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|e| e.error)?;
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 fn read_reviews(path: &Path) -> Result<Vec<Review>> {
@@ -130,6 +132,8 @@ fn main() -> Result<()> {
                 .context("another run is using this state directory")?;
             let state_dir = state_dir.canonicalize()?;
             let pending = state_dir.join("pending-issue.json");
+            let receipts_path = state_dir.join("created-issues.json");
+            let receipts = github::load_receipts(&receipts_path)?;
             ensure!(
                 !pending.exists(),
                 "pending-issue.json exists: a previous POST may have succeeded. Inspect GitHub and reconcile it before removing the journal."
@@ -260,10 +264,11 @@ fn main() -> Result<()> {
                         github::same_issues(&expected, &fresh, &matched, &created_urls),
                         "Issues/PRs changed; report contains partial results. Rerun."
                     );
-                    if expected
-                        .iter()
-                        .chain(&fresh)
-                        .any(|i| i.body.contains(&f.marker()))
+                    if receipts.contains_key(&f.marker())
+                        || expected
+                            .iter()
+                            .chain(&fresh)
+                            .any(|i| i.body.contains(&f.marker()))
                     {
                         continue;
                     }
@@ -273,6 +278,8 @@ fn main() -> Result<()> {
                         &f.title,
                         &analysis::issue_body(f, &reviews, &snapshots)?,
                         &pending,
+                        &receipts_path,
+                        &f.marker(),
                     )?;
                     let url = issue.url.clone();
                     eprintln!("Created {url}");
@@ -285,10 +292,14 @@ fn main() -> Result<()> {
                 // Commit processing state only after a fully successful apply. Pending or
                 // partially published runs are safely retried using stable issue markers.
                 for review in &reviews {
-                    if !findings.iter().any(|f| {
-                        f.status == Status::Uncertain && f.review_keys.contains(&review.key())
-                    }) {
-                        processed.insert(review.key(), review.fingerprint());
+                    let key = review.key();
+                    if findings
+                        .iter()
+                        .any(|f| f.status == Status::Uncertain && f.review_keys.contains(&key))
+                    {
+                        processed.remove(&key);
+                    } else {
+                        processed.insert(key, review.fingerprint());
                     }
                 }
                 atomic_json(&processed_path, &processed)?;

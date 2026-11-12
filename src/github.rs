@@ -209,7 +209,22 @@ pub fn check_heads(snapshots: &[Snapshot]) -> Result<()> {
     Ok(())
 }
 
-pub fn create_issue(repo: &str, title: &str, body: &str, journal: &Path) -> Result<Issue> {
+pub fn load_receipts(path: &Path) -> Result<std::collections::BTreeMap<String, String>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn create_issue(
+    repo: &str,
+    title: &str,
+    body: &str,
+    journal: &Path,
+    receipts: &Path,
+    marker: &str,
+) -> Result<Issue> {
     ensure!(REPOS.contains(&repo), "invalid issue destination");
     crate::security::check_output(title)?;
     crate::security::check_output(body)?;
@@ -222,6 +237,8 @@ pub fn create_issue(repo: &str, title: &str, body: &str, journal: &Path) -> Resu
         &json!({"repository":repo,"title":title,"body":body}),
     )?)?;
     journal_file.sync_all()?;
+    #[cfg(unix)]
+    fs::File::open(journal.parent().context("missing journal directory")?)?.sync_all()?;
     let mut child = Command::new("gh")
         .args([
             "api",
@@ -264,6 +281,10 @@ pub fn create_issue(repo: &str, title: &str, body: &str, journal: &Path) -> Resu
         is_pr: false,
         comments: vec![],
     };
+    let mut recorded = load_receipts(receipts)?;
+    recorded.insert(marker.to_owned(), issue.url.clone());
+    crate::atomic_json(receipts, &recorded)?;
+    // The durable success record must precede removing the ambiguous-operation guard.
     fs::remove_file(journal)?;
     Ok(issue)
 }
