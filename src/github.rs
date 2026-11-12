@@ -141,16 +141,32 @@ pub fn snapshot(repo: &str, workspace: &Path) -> Result<Snapshot> {
     })
 }
 
-pub fn same_issues(a: &[Issue], b: &[Issue]) -> bool {
-    a.len() == b.len()
-        && a.iter().zip(b).all(|(a, b)| {
+pub fn same_issues(
+    a: &[Issue],
+    b: &[Issue],
+    matched: &std::collections::HashSet<String>,
+    created: &std::collections::HashSet<String>,
+) -> bool {
+    let before: std::collections::HashMap<_, _> = a.iter().map(|i| (&i.url, i)).collect();
+    let after: std::collections::HashMap<_, _> = b.iter().map(|i| (&i.url, i)).collect();
+    if before.len() != a.len() || after.len() != b.len() {
+        return false;
+    }
+    if after.keys().any(|url| !before.contains_key(url)) {
+        return false;
+    }
+    before.iter().all(|(url, a)| match after.get(url) {
+        None => created.contains(*url), // POST result is authoritative while the list catches up.
+        Some(b) => {
             a.repository == b.repository
                 && a.number == b.number
-                && a.updated_at == b.updated_at
-                && a.state == b.state
-                && a.body == b.body
                 && a.title == b.title
-        })
+                && a.body == b.body
+                && a.is_pr == b.is_pr
+                && (!matched.contains(*url)
+                    || (a.state == b.state && a.state_reason == b.state_reason))
+        }
+    })
 }
 
 pub fn reference_details(
@@ -193,8 +209,10 @@ pub fn check_heads(snapshots: &[Snapshot]) -> Result<()> {
     Ok(())
 }
 
-pub fn create_issue(repo: &str, title: &str, body: &str, journal: &Path) -> Result<String> {
+pub fn create_issue(repo: &str, title: &str, body: &str, journal: &Path) -> Result<Issue> {
     ensure!(REPOS.contains(&repo), "invalid issue destination");
+    crate::security::check_output(title)?;
+    crate::security::check_output(body)?;
     // Persist intent BEFORE POST. An ambiguous response must never trigger a blind retry.
     let mut journal_file = fs::OpenOptions::new()
         .write(true)
@@ -232,6 +250,90 @@ pub fn create_issue(repo: &str, title: &str, body: &str, journal: &Path) -> Resu
         .as_str()
         .context("missing created issue URL; inspect pending journal")?
         .to_owned();
+    let issue = Issue {
+        repository: repo.into(),
+        number: v["number"]
+            .as_u64()
+            .context("missing issue number; inspect pending journal")?,
+        url,
+        title: title.into(),
+        body: body.into(),
+        state: v["state"].as_str().context("missing issue state")?.into(),
+        state_reason: v["state_reason"].as_str().unwrap_or_default().into(),
+        updated_at: v["updated_at"].as_str().unwrap_or_default().into(),
+        is_pr: false,
+        comments: vec![],
+    };
     fs::remove_file(journal)?;
-    Ok(url)
+    Ok(issue)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    fn issue() -> Issue {
+        Issue {
+            repository: REPOS[0].into(),
+            number: 1,
+            url: "https://github.com/TrainLCD/MobileApp/issues/1".into(),
+            title: "title".into(),
+            body: "body".into(),
+            state: "open".into(),
+            state_reason: "".into(),
+            updated_at: "old".into(),
+            is_pr: false,
+            comments: vec![],
+        }
+    }
+    #[test]
+    fn unrelated_activity_does_not_invalidate_analysis() {
+        let before = issue();
+        let mut after = before.clone();
+        after.updated_at = "new".into();
+        after.state = "closed".into();
+        assert!(same_issues(
+            std::slice::from_ref(&before),
+            std::slice::from_ref(&after),
+            &HashSet::new(),
+            &HashSet::new()
+        ));
+        assert!(!same_issues(
+            std::slice::from_ref(&before),
+            std::slice::from_ref(&after),
+            &HashSet::from([before.url.clone()]),
+            &HashSet::new()
+        ));
+        after.body = "changed".into();
+        assert!(!same_issues(
+            &[before],
+            &[after],
+            &HashSet::new(),
+            &HashSet::new()
+        ));
+    }
+    #[test]
+    fn delayed_own_issue_visibility_is_allowed_but_external_additions_are_not() {
+        let own = issue();
+        let created = HashSet::from([own.url.clone()]);
+        assert!(same_issues(
+            std::slice::from_ref(&own),
+            &[],
+            &HashSet::new(),
+            &created
+        ));
+        assert!(!same_issues(
+            std::slice::from_ref(&own),
+            &[],
+            &HashSet::new(),
+            &HashSet::new()
+        ));
+        assert!(same_issues(
+            std::slice::from_ref(&own),
+            std::slice::from_ref(&own),
+            &HashSet::new(),
+            &created
+        ));
+        assert!(!same_issues(&[], &[own], &HashSet::new(), &created));
+    }
 }

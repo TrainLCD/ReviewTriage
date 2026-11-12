@@ -25,6 +25,9 @@ impl Review {
     pub fn key(&self) -> String {
         format!("{}:{}", self.store, self.id)
     }
+    pub fn fingerprint(&self) -> String {
+        digest(&serde_json::to_string(self).expect("Review serialization is infallible"))
+    }
     pub fn validate(&self) -> Result<()> {
         ensure!(
             ["apple", "google"].contains(&self.store.as_str()),
@@ -92,16 +95,9 @@ pub struct Finding {
 }
 impl Finding {
     pub fn marker(&self) -> String {
-        let mut keys = self.review_keys.clone();
-        keys.sort();
         format!(
             "<!-- trainlcd-review-triage:{} -->",
-            digest(&format!(
-                "{}\n{}\n{}",
-                self.repository,
-                keys.join("\n"),
-                self.topic
-            ))
+            digest(&format!("{}\n{}", self.repository, self.topic))
         )
     }
 }

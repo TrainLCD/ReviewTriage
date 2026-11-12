@@ -2,6 +2,7 @@ mod analysis;
 mod github;
 mod http;
 mod model;
+mod security;
 mod stores;
 
 use anyhow::{Context, Result, ensure};
@@ -42,6 +43,9 @@ enum Action {
         input: Option<PathBuf>,
         #[arg(long, default_value = ".review-triage")]
         state_dir: PathBuf,
+        /// Reanalyze unchanged reviews already handled by a successful --apply run.
+        #[arg(long)]
+        recheck: bool,
         /// Create only evidence-backed new issues after all batches validate.
         #[arg(long)]
         apply: bool,
@@ -113,6 +117,7 @@ fn main() -> Result<()> {
             batch_size,
             model,
             timeout_seconds,
+            recheck,
         } => {
             fs::create_dir_all(&state_dir)?;
             let lock = OpenOptions::new()
@@ -146,13 +151,27 @@ fn main() -> Result<()> {
             }
             let reviews = model::merge_reviews(reviews)?;
             atomic_json(&cache, &reviews)?;
+            let total_reviews = reviews.len();
+            let processed_path = state_dir.join("processed.json");
+            let mut processed: std::collections::BTreeMap<String, String> =
+                if processed_path.exists() {
+                    serde_json::from_slice(&fs::read(&processed_path)?)?
+                } else {
+                    Default::default()
+                };
+            let reviews: Vec<_> = reviews
+                .into_iter()
+                .filter(|r| recheck || processed.get(&r.key()) != Some(&r.fingerprint()))
+                .collect();
             let report_path = state_dir.join("report.json");
             if reviews.is_empty() {
                 atomic_json(
                     &report_path,
                     &json!({"created_at":chrono::Utc::now(),"findings":[],"created_issues":[],"coverage":"Apple selected territory; Google last 7 days plus supplied CSV/cache"}),
                 )?;
-                eprintln!("No text reviews in fetched coverage.");
+                eprintln!(
+                    "No new or edited text reviews to analyze (use --recheck to reanalyze processed reviews)."
+                );
                 return Ok(());
             }
             eprintln!(
@@ -218,13 +237,18 @@ fn main() -> Result<()> {
             }
             let drafts:Vec<_>=findings.iter().filter(|f|f.status==Status::New).map(|f|Ok(json!({"repository":f.repository,"title":f.title,"body":analysis::issue_body(f,&reviews,&snapshots)?}))).collect::<Result<_>>()?;
             let mut report = json!({"created_at":chrono::Utc::now(),"coverage":"Apple selected territory; Google last 7 days plus supplied CSV/cache. Google API does not expose country.",
-                "snapshots":snapshots,"review_count":reviews.len(),"findings":findings,"drafts":drafts,"created_issues":[],"apply":apply});
+                "snapshots":snapshots,"review_count":reviews.len(),"cached_review_count":total_reviews,"findings":findings,"drafts":drafts,"created_issues":[],"apply":apply});
             atomic_json(&report_path, &report)?;
             if apply {
+                let matched: std::collections::HashSet<_> = findings
+                    .iter()
+                    .flat_map(|f| f.related_urls.iter().cloned())
+                    .collect();
+                let mut created_urls = std::collections::HashSet::new();
                 github::check_heads(&snapshots)?;
                 let current = all_issues(false)?;
                 ensure!(
-                    github::same_issues(&issues, &current),
+                    github::same_issues(&issues, &current, &matched, &created_urls),
                     "Issues/PRs changed during analysis; rerun to check for duplicates"
                 );
                 let mut expected = current;
@@ -233,32 +257,41 @@ fn main() -> Result<()> {
                     // Recheck immediately before each write, including after our own previous issue.
                     let fresh = all_issues(false)?;
                     ensure!(
-                        github::same_issues(&expected, &fresh),
+                        github::same_issues(&expected, &fresh, &matched, &created_urls),
                         "Issues/PRs changed; report contains partial results. Rerun."
                     );
-                    if fresh.iter().any(|i| i.body.contains(&f.marker())) {
+                    if expected
+                        .iter()
+                        .chain(&fresh)
+                        .any(|i| i.body.contains(&f.marker()))
+                    {
                         continue;
                     }
                     github::check_heads(&snapshots)?;
-                    let url = github::create_issue(
+                    let issue = github::create_issue(
                         &f.repository,
                         &f.title,
                         &analysis::issue_body(f, &reviews, &snapshots)?,
                         &pending,
                     )?;
+                    let url = issue.url.clone();
                     eprintln!("Created {url}");
                     created.push(url.clone());
                     report["created_issues"] = json!(created);
                     atomic_json(&report_path, &report)?;
-                    let after = all_issues(false)?;
-                    let unrelated: Vec<_> =
-                        after.iter().filter(|i| i.url != url).cloned().collect();
-                    ensure!(
-                        github::same_issues(&expected, &unrelated),
-                        "Concurrent issue changes detected after creation; report has partial results. Rerun."
-                    );
-                    expected = after;
+                    created_urls.insert(url);
+                    expected.push(issue);
                 }
+                // Commit processing state only after a fully successful apply. Pending or
+                // partially published runs are safely retried using stable issue markers.
+                for review in &reviews {
+                    if !findings.iter().any(|f| {
+                        f.status == Status::Uncertain && f.review_keys.contains(&review.key())
+                    }) {
+                        processed.insert(review.key(), review.fingerprint());
+                    }
+                }
+                atomic_json(&processed_path, &processed)?;
             }
             eprintln!(
                 "{} actionable drafts; {} total findings. Report: {}{}",

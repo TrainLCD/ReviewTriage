@@ -1,6 +1,6 @@
 use crate::{
     http,
-    model::{APP_ID, PACKAGE, Review, digest},
+    model::{APP_ID, PACKAGE, Review},
 };
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
@@ -227,7 +227,7 @@ pub fn parse_csv(text: &str) -> Result<Vec<Review>> {
         ensure!(headers.iter().any(|s| s == h), "missing CSV column: {h}");
     }
     let mut out = vec![];
-    for row in reader.records() {
+    for (index, row) in reader.records().enumerate() {
         let row = row?;
         let get = |name: &str| {
             headers
@@ -255,17 +255,8 @@ pub fn parse_csv(text: &str) -> Result<Vec<Review>> {
                             .map(str::to_owned)
                     })
             })
-            .unwrap_or_else(|| {
-                format!(
-                    "csv-{}",
-                    digest(&format!(
-                        "{}\n{}\n{}",
-                        get("Review Submit Date and Time"),
-                        title,
-                        body
-                    ))
-                )
-            });
+            .filter(|id| !id.trim().is_empty())
+            .with_context(|| format!("CSV row {} has no stable review ID in Review Link; import refused (no content-derived IDs)", index + 2))?;
         let date = get("Review Last Update Date and Time");
         let date = if date.is_empty() {
             get("Review Submit Date and Time")
@@ -292,6 +283,23 @@ pub fn parse_csv(text: &str) -> Result<Vec<Review>> {
 mod tests {
     use super::*;
     #[test]
+    fn unidentified_csv_rows_are_rejected_and_edits_keep_the_real_id() {
+        let csv = format!(
+            "Package Name,Star Rating,Review Submit Date and Time,Review Text,Review Link\n{PACKAGE},4,2026-11-01T00:00:00Z,old,https://play.google.com/store/apps/details?reviewId=r1\n"
+        );
+        let old = parse_csv(&csv).unwrap();
+        let new = parse_csv(&csv.replace(",old,", ",edited,")).unwrap();
+        assert_eq!(old[0].id, new[0].id);
+        let no_link = csv.replace("https://play.google.com/store/apps/details?reviewId=r1", "");
+        assert!(
+            parse_csv(&no_link)
+                .unwrap_err()
+                .to_string()
+                .contains("CSV row 2")
+        );
+        assert!(parse_csv(&no_link.replace(",old,", ",edited,")).is_err());
+    }
+    #[test]
     fn google_uses_user_comment_not_developer_reply() {
         let v = json!({"reviews":[{"reviewId":"r","comments":[{"developerComment":{"text":"修正しました"}},
             {"userComment":{"text":"title\tbody","starRating":5,"lastModified":{"seconds":"1793491200","nanos":1}}}]}]});
@@ -303,7 +311,7 @@ mod tests {
     #[test]
     fn csv_handles_commas_and_rejects_wrong_app() {
         let csv = format!(
-            "Package Name,Star Rating,Review Submit Date and Time,Review Text\n{PACKAGE},4,2026-11-01T00:00:00Z,\"a,b\"\n"
+            "Package Name,Star Rating,Review Submit Date and Time,Review Text,Review Link\n{PACKAGE},4,2026-11-01T00:00:00Z,\"a,b\",https://play.google.com/store/apps/details?reviewId=r1\n"
         );
         assert_eq!(parse_csv(&csv).unwrap()[0].text, "a,b");
         assert!(parse_csv(&csv.replace(PACKAGE, "wrong.app")).is_err());

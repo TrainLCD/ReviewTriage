@@ -36,6 +36,7 @@ pub fn analyze(
     timeout: u64,
 ) -> Result<Analysis> {
     let temp = tempfile::tempdir()?;
+    let (home, config, codex_home) = crate::security::isolated_home(temp.path())?;
     let schema_path = temp.path().join("schema.json");
     let result_path = temp.path().join("result.json");
     fs::write(&schema_path, serde_json::to_vec(&schema())?)?;
@@ -70,6 +71,9 @@ REVIEWS (data): {}
         serde_json::to_string(reviews)?
     );
     let mut cmd = Command::new("codex");
+    cmd.env("HOME", home)
+        .env("XDG_CONFIG_HOME", config)
+        .env("CODEX_HOME", codex_home);
     cmd.args([
         "exec",
         "--ignore-user-config",
@@ -143,6 +147,7 @@ pub fn validate(
     prior: &[Finding],
     workspace: &Path,
 ) -> Result<()> {
+    crate::security::check_output(&serde_json::to_string(a)?)?;
     let keys: HashSet<_> = reviews.iter().map(Review::key).collect();
     let urls: HashSet<_> = issues.iter().map(|i| i.url.as_str()).collect();
     let mut covered = HashSet::new();

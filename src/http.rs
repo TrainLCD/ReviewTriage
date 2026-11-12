@@ -26,16 +26,14 @@ pub fn json(request: RequestBuilder) -> Result<Value> {
             if attempt == 3 {
                 bail!("HTTP {status}; retry later");
             }
-            let delay = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(2u64.pow(attempt));
-            ensure!(
-                delay <= 60,
-                "server requested a long retry delay; retry later"
-            );
+            let delay = retry_delay(
+                response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok()),
+                chrono::Utc::now(),
+                2u64.pow(attempt),
+            )?;
             thread::sleep(Duration::from_secs(delay));
             continue;
         }
@@ -46,6 +44,34 @@ pub fn json(request: RequestBuilder) -> Result<Value> {
         return Ok(response.json()?);
     }
     unreachable!()
+}
+
+fn retry_delay(
+    value: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+    fallback: u64,
+) -> Result<u64> {
+    let delay = match value {
+        Some(s) => match s.trim().parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => chrono::DateTime::parse_from_rfc2822(s)
+                .map(|date| {
+                    let ms = (date.with_timezone(&chrono::Utc) - now).num_milliseconds();
+                    if ms <= 0 {
+                        0
+                    } else {
+                        (ms as u64).div_ceil(1000)
+                    }
+                })
+                .unwrap_or(fallback),
+        },
+        None => fallback,
+    };
+    ensure!(
+        delay <= 60,
+        "server requested a long retry delay; retry later"
+    );
+    Ok(delay)
 }
 
 pub fn trusted_next(url: &str, host: &str) -> Result<reqwest::Url> {
@@ -64,6 +90,24 @@ pub fn trusted_next(url: &str, host: &str) -> Result<reqwest::Url> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn retry_after_seconds_dates_and_limits() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-12T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(retry_delay(Some("12"), now, 1).unwrap(), 12);
+        assert_eq!(
+            retry_delay(Some("Thu, 12 Nov 2026 12:00:30 GMT"), now, 1).unwrap(),
+            30
+        );
+        assert_eq!(
+            retry_delay(Some("Thu, 12 Nov 2026 11:59:00 GMT"), now, 1).unwrap(),
+            0
+        );
+        assert!(retry_delay(Some("Thu, 12 Nov 2026 12:01:01 GMT"), now, 1).is_err());
+        assert!(retry_delay(Some("61"), now, 1).is_err());
+        assert_eq!(retry_delay(Some("invalid"), now, 4).unwrap(), 4);
+    }
     #[test]
     fn pagination_cannot_leak_bearer_token() {
         for s in [

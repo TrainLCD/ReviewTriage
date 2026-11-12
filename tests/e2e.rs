@@ -37,6 +37,13 @@ elif name=='gh':
   elif '/issues/' in endpoint: print('{}')
   else: print(json.dumps({'default_branch':'main'}))
 elif name=='codex':
+ assert pathlib.Path(os.environ['HOME']) != root/'original-home'
+ assert pathlib.Path(os.environ['XDG_CONFIG_HOME']).is_dir()
+ codex_home=pathlib.Path(os.environ['CODEX_HOME'])
+ assert json.loads((codex_home/'auth.json').read_text())=={'test':'auth-only'}
+ assert not (codex_home/'config.toml').exists()
+ assert 'GH_TOKEN' not in os.environ
+ calls=root/'codex-calls';calls.write_text(str(int(calls.read_text())+1 if calls.exists() else 1))
  prompt=sys.stdin.read()
  reviews=json.loads(prompt.split('REVIEWS (data): ')[-1])
  workspace=pathlib.Path(args[args.index('--cd')+1])
@@ -49,6 +56,11 @@ elif name=='codex':
    'repository':'TrainLCD/StationAPI','title':'駅名の誤記を修正','body':'報告された駅名を確認して修正する。','reason':'現行コードに誤記がある。',
    'evidence':[{'repository':'TrainLCD/StationAPI','path':'source.rs','line':1,'explanation':'駅名の定義'}],
    'related_urls':[known[0]['url']] if known else []})
+ if mode.startswith('secret-'):
+  field=mode[7:]
+  if field=='explanation': findings[0]['evidence'][0][field]='ghp_not_a_real_secret'
+  else: findings[0][field]='ghp_not_a_real_secret'
+ if mode=='uncertain': findings[0]['status']='uncertain'
  if mode=='omitted': findings=[]
  if mode=='bad-evidence': findings[0]['evidence'][0]['path']='../github-context.json'
  if mode=='new-despite-marker': findings[0]['status']='new';findings[0]['related_urls']=[]
@@ -59,6 +71,13 @@ elif name=='codex':
             fs::write(&p, script).unwrap();
             fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
         }
+        fs::create_dir(dir.path().join("original-codex")).unwrap();
+        fs::write(
+            dir.path().join("original-codex/auth.json"),
+            r#"{"test":"auth-only"}"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("original-codex/config.toml"), "not copied").unwrap();
         let reviews = json!([{"store":"google","id":"r1","title":"","text":"駅名が違う","rating":5,"updated_at":"2026-11-01T00:00:00Z","version":"1.0","locale":"ja","url":"https://play.google.com/store/apps/details?id=me.tinykitten.trainlcd","developer_reply":""}]);
         fs::write(
             dir.path().join("input.json"),
@@ -68,6 +87,8 @@ elif name=='codex':
         Self { dir }
     }
     fn run(&self, apply: bool, mode: &str) -> std::process::Output {
+        let recheck = mode.starts_with("recheck-");
+        let mode = mode.strip_prefix("recheck-").unwrap_or(mode);
         let mut c = Command::new(env!("CARGO_BIN_EXE_trainlcd-review-triage"));
         c.args(["run", "--input"])
             .arg(self.dir.path().join("input.json"))
@@ -82,8 +103,14 @@ elif name=='codex':
                     std::env::var("PATH").unwrap()
                 ),
             )
+            .env("HOME", self.dir.path().join("original-home"))
+            .env("CODEX_HOME", self.dir.path().join("original-codex"))
+            .env("GH_TOKEN", "test-not-forwarded")
             .env("MOCK_ROOT", self.dir.path())
             .env("MOCK_MODE", mode);
+        if recheck {
+            c.arg("--recheck");
+        }
         if apply {
             c.arg("--apply");
         }
@@ -108,7 +135,7 @@ fn dry_run_then_apply_then_rerun_does_not_duplicate() {
     let o = h.run(true, "normal");
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert_eq!(h.count(), 1);
-    let o = h.run(true, "new-despite-marker");
+    let o = h.run(true, "recheck-new-despite-marker");
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert_eq!(h.count(), 1);
 }
@@ -129,4 +156,53 @@ fn ambiguous_post_is_not_retried() {
     assert!(h.dir.path().join("state/pending-issue.json").exists());
     assert!(!h.run(true, "normal").status.success());
     assert_eq!(h.count(), 1);
+}
+
+#[test]
+fn new_reviews_share_stable_marker_and_edited_reviews_are_reanalyzed() {
+    let h = Harness::new();
+    assert!(h.run(true, "normal").status.success());
+    let path = h.dir.path().join("input.json");
+    let mut rows: Vec<Value> = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut second = rows[0].clone();
+    second["id"] = json!("r2");
+    rows.push(second);
+    fs::write(&path, serde_json::to_vec(&rows).unwrap()).unwrap();
+    let o = h.run(true, "new-despite-marker");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(h.count(), 1);
+    let calls = fs::read_to_string(h.dir.path().join("codex-calls")).unwrap();
+    assert!(h.run(true, "normal").status.success());
+    assert_eq!(
+        calls,
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap()
+    );
+    rows[0]["text"] = json!("編集された要望");
+    rows[0]["updated_at"] = json!("2026-11-12T00:00:00Z");
+    fs::write(path, serde_json::to_vec(&rows).unwrap()).unwrap();
+    assert!(h.run(true, "normal").status.success());
+    let report: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap()).unwrap();
+    assert_eq!(report["review_count"], 1);
+    assert_eq!(h.count(), 1);
+}
+#[test]
+fn uncertain_reviews_remain_pending_and_dry_run_does_not_mark_processed() {
+    let h = Harness::new();
+    assert!(h.run(false, "normal").status.success());
+    assert!(!h.dir.path().join("state/processed.json").exists());
+    assert!(h.run(true, "uncertain").status.success());
+    assert!(h.run(true, "normal").status.success());
+    assert_eq!(h.count(), 1);
+}
+#[test]
+fn credential_patterns_in_every_model_field_never_reach_github_or_report() {
+    for field in ["title", "body", "reason", "explanation"] {
+        let h = Harness::new();
+        let o = h.run(true, &format!("secret-{field}"));
+        assert!(!o.status.success());
+        assert_eq!(h.count(), 0);
+        assert!(!String::from_utf8_lossy(&o.stderr).contains("ghp_not_a_real_secret"));
+        assert!(!h.dir.path().join("state/report.json").exists());
+    }
 }
