@@ -74,8 +74,13 @@ elif name=='codex':
   props=schema['properties']['findings']['items']['properties']
   assert destination in props['repository']['enum']
   assert destination in props['evidence']['items']['properties']['repository']['enum']
- for r in reviews:
-  findings.append({'review_keys':[r['store']+':'+r['id']], 'topic':'station-name','status':'existing' if known else 'new',
+ schema=json.loads(pathlib.Path(args[args.index('--output-schema')+1]).read_text())
+ allowed=schema['properties']['findings']['items']['properties']['review_keys']['items']['enum']
+ assert allowed==[entry['review_key'] for entry in reviews]
+ for entry in reviews:
+  r=entry['review']
+  assert entry['review_key']==r['store']+':'+r['id']
+  findings.append({'review_keys':[entry['review_key']], 'topic':'station-name','status':'existing' if known else 'new',
    'repository':destination,'title':'駅名の誤記を修正','body':'報告された駅名を確認して修正する。','reason':'現行コードに誤記がある。',
    'evidence':[{'repository':destination,'path':'source.rs','line':1,'explanation':'駅名の定義'}],
    'related_urls':[known[0]['url']] if known else []})
