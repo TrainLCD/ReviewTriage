@@ -17,9 +17,15 @@ def select_run(runs, current_id, jobs_for):
         if run["id"] == current_id:
             continue
         # Pending requests cannot yet have changed state under workflow concurrency.
-        if run["status"] in ("queued", "requested", "waiting", "pending"):
+        if (run.get("run_attempt", 1) == 1
+                and run["status"] in ("queued", "requested", "waiting", "pending")):
             continue
         jobs = jobs_for(run["id"])
+        if any("run_attempt" not in job for job in jobs):
+            raise RuntimeError("Cannot establish job attempt safely")
+        # Only attempt 1 may write state. Later attempts are rejected before
+        # restoration; their completion timestamps must not reorder old artifacts.
+        jobs = [job for job in jobs if job["run_attempt"] == 1]
         started = [
             job for job in jobs
             if any(step.get("started_at") and step.get("conclusion") != "skipped"

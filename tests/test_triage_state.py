@@ -13,8 +13,8 @@ def run(i, conclusion="success", status="completed"):
     return {"id": i, "conclusion": conclusion, "status": status}
 
 
-def job(time):
-    return {"completed_at": time, "steps": [
+def job(time, attempt=1):
+    return {"run_attempt": attempt, "completed_at": time, "steps": [
         {"started_at": "2026-11-13T00:00:00Z", "conclusion": "success"}
     ]}
 
@@ -68,8 +68,37 @@ class StateSelectionTests(unittest.TestCase):
     def test_cancelled_rerun_cannot_hide_started_attempt(self):
         self.assertEqual(self.select(
             [run(20, "cancelled")],
-            jobs={20: [job("2026-11-13T02:00:00Z"), {"steps": []}]}
+            jobs={20: [job("2026-11-13T02:00:00Z"), {"run_attempt": 2, "steps": []}]}
         ), (20, False))
+
+    def test_rejected_rerun_does_not_promote_old_artifact(self):
+        self.assertEqual(self.select(
+            [run(10, "failure"), run(20)],
+            jobs={
+                10: [job("2026-11-13T01:00:00Z"),
+                     job("2026-11-13T03:00:00Z", attempt=2)],
+                20: [job("2026-11-13T02:00:00Z")]
+            }
+        ), (20, False))
+
+    def test_failed_first_attempt_is_not_hidden_by_rejected_rerun(self):
+        self.assertEqual(self.select(
+            [run(10), run(20, "failure")],
+            jobs={
+                10: [job("2026-11-13T01:00:00Z")],
+                20: [job("2026-11-13T02:00:00Z"),
+                     job("2026-11-13T03:00:00Z", attempt=2)]
+            }
+        ), (20, False))
+
+    def test_unknown_job_attempt_stops(self):
+        with self.assertRaises(RuntimeError):
+            self.select([run(20)], jobs={20: [{"steps": []}]})
+
+    def test_queued_rerun_cannot_hide_first_attempt(self):
+        queued = dict(run(20, None, "queued"), run_attempt=2)
+        with self.assertRaises(RuntimeError):
+            self.select([queued], jobs={20: [job("2026-11-13T02:00:00Z")]})
 
     def test_ambiguous_order_stops(self):
         with self.assertRaises(RuntimeError):
