@@ -107,7 +107,7 @@ jobs:
           [[ "$RECHECK" != true ]] || args+=(--recheck)
           # Codex inherits stdout/stderr; keep review text out of public Actions logs.
           target/release/trainlcd-review-triage "${args[@]}" > "$RUNNER_TEMP/review-triage.log" 2>&1 || {
-            echo "::error::Review triage failed. Inspect the state artifact and credential configuration; raw analysis logs are not published."
+            python3 scripts/report_triage_error.py "$RUNNER_TEMP/review-triage.log"
             exit 1
           }
       - name: Save state and report
