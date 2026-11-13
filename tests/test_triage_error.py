@@ -10,6 +10,25 @@ spec.loader.exec_module(diagnostics)
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_signal_failure(self):
+        for program in ("gh", "git"):
+            for status in ("signal: 9 (SIGKILL)", "signal: 15 (SIGTERM)",
+                           "signal: 11 (SIGSEGV) (core dumped)",
+                           "signal: 35 (unknown signal)"):
+                raw = f"{program} failed (exit {status}); check installation/authentication"
+                with self.subTest(program=program, status=status):
+                    message = diagnostics.summarize("Error: " + raw)
+                    self.assertIn("コマンド失敗", message)
+                    self.assertNotIn(raw, message)
+                    self.assertNotIn(status, message)
+
+    def test_signal_failure_private_suffix_is_rejected(self):
+        raw = ("Error: git failed (exit signal: 9 (SIGKILL)); "
+               "check installation/authentication private")
+        message = diagnostics.summarize(raw)
+        self.assertNotIn("コマンド失敗", message)
+        self.assertNotIn("private", message)
+
     def test_validation_errors(self):
         expected = {
             "unknown related URL": "未知の関連URL",
@@ -108,4 +127,5 @@ class DiagnosticsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -61,7 +61,9 @@ def summarize(log):
         elif cause in CAUSES:
             details.append(CAUSES[cause])
         elif re.fullmatch(
-            r"(?:gh|git) failed \(exit exit status: [0-9]+\); check installation/authentication",
+            r"(?:gh|git) failed \(exit (?:exit status: [0-9]+|"
+            r"signal: [0-9]+ \((?:SIG[A-Z0-9]+|unknown signal)\)(?: \(core dumped\))?)"
+            r"\); check installation/authentication",
             cause,
         ):
             details.append("GitHub取得またはGit操作のコマンド失敗")
@@ -82,4 +84,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
