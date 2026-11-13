@@ -10,6 +10,51 @@ spec.loader.exec_module(diagnostics)
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_signal_failure(self):
+        for program in ("gh", "git"):
+            for status in ("signal: 9 (SIGKILL)", "signal: 15 (SIGTERM)",
+                           "signal: 11 (SIGSEGV) (core dumped)",
+                           "signal: 35", "signal: 35 (core dumped)"):
+                raw = f"{program} failed (exit {status}); check installation/authentication"
+                with self.subTest(program=program, status=status):
+                    message = diagnostics.summarize("Error: " + raw)
+                    self.assertIn("コマンド失敗", message)
+                    self.assertNotIn(raw, message)
+                    self.assertNotIn(status, message)
+
+    def test_signal_failure_private_suffix_is_rejected(self):
+        raw = ("Error: git failed (exit signal: 9 (SIGKILL)); "
+               "check installation/authentication private")
+        message = diagnostics.summarize(raw)
+        self.assertNotIn("コマンド失敗", message)
+        self.assertNotIn("private", message)
+
+    def test_validation_errors(self):
+        expected = {
+            "unknown related URL": "未知の関連URL",
+            "invalid evidence line": "行番号",
+            "Codex omitted reviews; no issues published": "未処理レビュー",
+            "Codex did not produce a result": "結果ファイルなし",
+        }
+        for error, detail in expected.items():
+            with self.subTest(error=error):
+                self.assertIn(detail, diagnostics.summarize("Error: " + error))
+
+    def test_command_failure(self):
+        for program in ("gh", "git"):
+            message = diagnostics.summarize(
+                f"Error: {program} failed (exit exit status: 1); check installation/authentication"
+            )
+            self.assertIn("コマンド失敗", message)
+
+    def test_command_failure_with_private_suffix_is_rejected(self):
+        message = diagnostics.summarize(
+            "Error: gh failed (exit exit status: 1); check installation/authentication private"
+        )
+        self.assertNotIn("コマンド失敗", message)
+        self.assertNotIn("private", message)
+
+
     def test_unknown_http_reason(self):
         message = diagnostics.summarize(
             "Error: App Store fetch failed; no issues published\n"
@@ -82,4 +127,5 @@ class DiagnosticsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
