@@ -10,6 +10,22 @@ spec.loader.exec_module(diagnostics)
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_unknown_http_reason(self):
+        message = diagnostics.summarize(
+            "Error: App Store fetch failed; no issues published\n"
+            "Caused by:\n    HTTP 520 <unknown status code>; retry later\n"
+        )
+        self.assertIn("HTTP 520", message)
+        self.assertNotIn("<unknown status code>", message)
+
+    def test_apostrophe_in_http_reason(self):
+        message = diagnostics.summarize(
+            "Error: App Store fetch failed; no issues published\n"
+            "Caused by:\n    HTTP 418 I'm a teapot (check credentials and permissions)\n"
+        )
+        self.assertIn("HTTP 418", message)
+        self.assertNotIn("I'm a teapot", message)
+
     def test_apple_http_failure(self):
         message = diagnostics.summarize(
             "Error: App Store fetch failed; no issues published\n\n"
@@ -66,3 +82,4 @@ class DiagnosticsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

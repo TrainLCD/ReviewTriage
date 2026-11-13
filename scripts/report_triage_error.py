@@ -33,7 +33,8 @@ def summarize(log):
     for line in lines:
         cause = re.sub(r"^\s*(?:\d+:\s*)?", "", line).strip()
         status = re.fullmatch(
-            r"HTTP ([1-5][0-9]{2})[ A-Za-z]*(?:; retry later| \(check credentials and permissions\))",
+            r"HTTP ([1-5][0-9]{2})(?:[ A-Za-z']*| <unknown status code>)"
+            r"(?:; retry later| \(check credentials and permissions\))",
             cause,
         )
         if status:
@@ -55,3 +56,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
