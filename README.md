@@ -1,6 +1,6 @@
 # ReviewTriage
 
-TrainLCDのApp Store／Google Playレビューを公式APIから取得し、Codex CLIで現行コードと既存Issue・PRを調べ、未対応の要望・不具合を `TrainLCD/MobileApp` または `TrainLCD/StationAPI` に起票するRust製CLI。
+TrainLCDのApp Store／Google Playレビューを公式APIから取得し、Codex CLIで現行コードと既存Issue・PRを調べ、未対応の要望・不具合を `TrainLCD/MobileApp`、`TrainLCD/StationAPI`、`TrainLCD/Functions`、`TrainLCD/Website` のいずれかに起票するRust製CLI。
 
 ## GitHub Actionsで実行（PC不要）
 
@@ -8,12 +8,14 @@ TrainLCDのApp Store／Google Playレビューを公式APIから取得し、Code
 
 | Secret | 内容 |
 | --- | --- |
-| `REVIEW_TRIAGE_GITHUB_TOKEN` | MobileApp／StationAPIのContents・Pull requestsの読み取りとIssuesの読み書きができるfine-grained PAT |
+| `REVIEW_TRIAGE_GITHUB_TOKEN` | MobileApp／StationAPI／Functions／WebsiteのContents・Pull requestsの読み取りとIssuesの読み書きができるfine-grained PAT |
 | `OPENAI_API_KEY` | Codexで使うOpenAI APIキー（API利用料金が発生） |
 | `ASC_ISSUER_ID` | App Store ConnectのIssuer ID |
 | `ASC_KEY_ID` | App Store ConnectのKey ID |
 | `ASC_PRIVATE_KEY` | App Store Connectの.p8ファイル全文（改行を含む） |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | Google Play用サービスアカウントJSON全文 |
+
+既存のfine-grained PATを使う場合は、対象リポジトリにFunctionsとWebsiteも追加し、上記権限を付与する。GitHub Actionsも同じ4リポジトリを調査・起票対象にする。過去の処理済みレビューを追加先も含めて再評価する場合は `--recheck` を使用する。
 
 ストア側の権限設定は下記「App Store Connect」「Google Play」を参照。標準の `GITHUB_TOKEN` では別リポジトリに起票できないため、専用PATを使用する。秘密鍵やJSONをworkflowの入力欄やリポジトリに貼らない。
 
@@ -118,7 +120,7 @@ trainlcd-review-triage run --model YOUR_MODEL --batch-size 10 --timeout-seconds 
 | `ignore` | 感想のみ等、対応対象なし |
 | `uncertain` | 再現性、対応状況、担当先、証拠が不足。起票せずレポートに残す |
 
-UI・測位・TTS・クライアントはMobileApp、駅・路線・種別・GTFSデータとAPIはStationAPIへ振り分ける。1レビュー内の複数要望を分け、同じ問題のレビューはまとめる。返信済み／Issueが閉じた事実だけでは修正済みとしない。
+アプリUI・測位・クライアント側TTS再生・ナビゲーションはMobileApp、駅・路線・種別・GTFSデータとAPIはStationAPI、サーバー側TTS生成・認証・フィードバック処理などのバックエンドはFunctions、公式サイトのページ・コンテンツ・Web UIはWebsiteへ振り分ける。TTSなど複数リポジトリに関係する報告は症状だけで決めず、コードの根拠で担当を判定し、特定できなければuncertainとする。1レビュー内の複数要望を分け、同じ問題のレビューはまとめる。返信済み／Issueが閉じた事実だけでは修正済みとしない。
 
 両リポジトリのデフォルトブランチを一時ディレクトリに取得し、全状態のIssue・PR本文をページネーションで収集する。該当するチケットのコメント・PR詳細は追加取得して再評価する。Git履歴は各100コミットまで。足りない証拠から完了や未対応を断定せず、判断保留にする。既存のローカル作業ツリーは変更しない。
 

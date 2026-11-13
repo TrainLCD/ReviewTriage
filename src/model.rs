@@ -3,7 +3,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-pub const REPOS: [&str; 2] = ["TrainLCD/MobileApp", "TrainLCD/StationAPI"];
+pub const REPOS: [&str; 4] = [
+    "TrainLCD/MobileApp",
+    "TrainLCD/StationAPI",
+    "TrainLCD/Functions",
+    "TrainLCD/Website",
+];
 pub const PACKAGE: &str = "me.tinykitten.trainlcd";
 pub const APP_ID: &str = "1486355943";
 
