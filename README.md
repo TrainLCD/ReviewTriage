@@ -39,7 +39,7 @@ artifactの保持は90日（リポジトリ側の上限も適用）。期限切�
 ## 準備
 
 - Rust stable（検証: 1.99.1）、Git、GitHub CLI (`gh`)、Codex CLI、`rg`。
-- `gh auth login`：両リポジトリの読み取りとIssue作成権限。
+- `gh auth login`：対象4リポジトリ（MobileApp／StationAPI／Functions／Website）の読み取りとIssue作成権限。
 - `codex login`：使用するモデルにアクセスできるアカウント。
 - App Store Connect APIキーと、Google Play Developer API用サービスアカウント。
 
@@ -122,7 +122,7 @@ trainlcd-review-triage run --model YOUR_MODEL --batch-size 10 --timeout-seconds 
 
 アプリUI・測位・クライアント側TTS再生・ナビゲーションはMobileApp、駅・路線・種別・GTFSデータとAPIはStationAPI、サーバー側TTS生成・認証・フィードバック処理などのバックエンドはFunctions、公式サイトのページ・コンテンツ・Web UIはWebsiteへ振り分ける。TTSなど複数リポジトリに関係する報告は症状だけで決めず、コードの根拠で担当を判定し、特定できなければuncertainとする。1レビュー内の複数要望を分け、同じ問題のレビューはまとめる。返信済み／Issueが閉じた事実だけでは修正済みとしない。
 
-両リポジトリのデフォルトブランチを一時ディレクトリに取得し、全状態のIssue・PR本文をページネーションで収集する。該当するチケットのコメント・PR詳細は追加取得して再評価する。Git履歴は各100コミットまで。足りない証拠から完了や未対応を断定せず、判断保留にする。既存のローカル作業ツリーは変更しない。
+対象4リポジトリ（MobileApp／StationAPI／Functions／Website）のデフォルトブランチを一時ディレクトリに取得し、全状態のIssue・PR本文をページネーションで収集する。該当するチケットのコメント・PR詳細は追加取得して再評価する。Git履歴は各100コミットまで。足りない証拠から完了や未対応を断定せず、判断保留にする。既存のローカル作業ツリーは変更しない。
 
 Codexは読み取り専用で呼び出し、JSON Schemaによる出力をさらにRust側で検証する。全レビューの判定漏れ、未知のレビューID、対象外リポジトリ、存在しないコード位置、未知のIssue URLを拒否する。モデルによる意味的判断自体の正しさは保証できないため、初回はdry-runのレポートを確認する。
 
@@ -130,7 +130,7 @@ Codexは読み取り専用で呼び出し、JSON Schemaによる出力をさら�
 
 ### 起票結果が不明になった場合
 
-通信切断等で `pending-issue.json` が残ったら自動再送しない。その本文の識別マーカーを両リポジトリで確認し、作成済みか未作成かを確定する。確認後にこのファイルを退避して再実行する。作成済みIssueは次回の照合対象になる。成功したPOSTのURLとマーカーは、pendingを削除する前に `created-issues.json` へ原子的に保存する。途中まで作成できたURLはreportにも記録する。state-dirの成功記録は削除せず保持する。
+通信切断等で `pending-issue.json` が残ったら自動再送しない。その本文の識別マーカーを対象4リポジトリ（MobileApp／StationAPI／Functions／Website）で確認し、作成済みか未作成かを確定する。確認後にこのファイルを退避して再実行する。作成済みIssueは次回の照合対象になる。成功したPOSTのURLとマーカーは、pendingを削除する前に `created-issues.json` へ原子的に保存する。途中まで作成できたURLはreportにも記録する。state-dirの成功記録は削除せず保持する。
 
 ### データと認証
 
