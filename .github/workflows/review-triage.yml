@@ -23,6 +23,7 @@ permissions:
 concurrency:
   group: review-triage
   cancel-in-progress: false
+  queue: max
 
 jobs:
   triage:
@@ -44,8 +45,8 @@ jobs:
             exit 1
           fi
           mkdir -p state
-          previous=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows/review-triage.yml/runs?branch=$GITHUB_REF_NAME&event=workflow_dispatch&per_page=100" \
-            --jq ".workflow_runs[] | select(.id < $GITHUB_RUN_ID) | .id" | sort -nr | sed -n '1p')
+          selection=$(python3 scripts/select_triage_state.py)
+          IFS='|' read -r previous stale <<< "$selection"
           if [[ -n "$previous" ]]; then
             # Never silently start fresh after a failed/cancelled run or expired artifact.
             gh run download "$previous" --repo "$GITHUB_REPOSITORY" \
@@ -54,6 +55,10 @@ jobs:
           touch state/checkpoint
           rm -f state/report.json
           echo "ready=true" >> "$GITHUB_OUTPUT"
+          if [[ "$stale" == true ]]; then
+            echo "::error::A newer request already ran. State was preserved; start a new workflow run."
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:
@@ -68,6 +73,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.REVIEW_TRIAGE_GITHUB_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
