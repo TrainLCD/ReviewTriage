@@ -67,10 +67,17 @@ elif name=='codex':
  if mode=='timeout':
   import time;time.sleep(30)
  findings=[]
+ destination='TrainLCD/'+mode[6:] if mode.startswith('route-') else 'TrainLCD/StationAPI'
+ if mode.startswith('route-'):
+  assert (workspace/mode[6:]/'source.rs').is_file()
+  schema=json.loads(pathlib.Path(args[args.index('--output-schema')+1]).read_text())
+  props=schema['properties']['findings']['items']['properties']
+  assert destination in props['repository']['enum']
+  assert destination in props['evidence']['items']['properties']['repository']['enum']
  for r in reviews:
   findings.append({'review_keys':[r['store']+':'+r['id']], 'topic':'station-name','status':'existing' if known else 'new',
-   'repository':'TrainLCD/StationAPI','title':'駅名の誤記を修正','body':'報告された駅名を確認して修正する。','reason':'現行コードに誤記がある。',
-   'evidence':[{'repository':'TrainLCD/StationAPI','path':'source.rs','line':1,'explanation':'駅名の定義'}],
+   'repository':destination,'title':'駅名の誤記を修正','body':'報告された駅名を確認して修正する。','reason':'現行コードに誤記がある。',
+   'evidence':[{'repository':destination,'path':'source.rs','line':1,'explanation':'駅名の定義'}],
    'related_urls':[known[0]['url']] if known else []})
  if mode.startswith('secret-'):
   field=mode[7:]
@@ -291,4 +298,36 @@ fn auth_refresh_persists_and_keyring_retains_native_storage_identity() {
     .unwrap();
     let o = h.run(false, "keyring");
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+}
+
+#[test]
+fn added_destinations_support_evidence_and_existing_issue_deduplication() {
+    for repo in ["Functions", "Website"] {
+        let h = Harness::new();
+        let mode = format!("route-{repo}");
+        let o = h.run(false, &mode);
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        assert_eq!(h.count(), 0);
+        let o = h.run(true, &mode);
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let issues: Vec<Value> =
+            serde_json::from_slice(&fs::read(h.dir.path().join("issues.json")).unwrap()).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues[0]["html_url"],
+            format!("https://github.com/TrainLCD/{repo}/issues/1")
+        );
+        assert!(issues[0]["body"].as_str().unwrap().contains(&format!(
+            "https://github.com/TrainLCD/{repo}/blob/{}/source.rs#L1",
+            "a".repeat(40)
+        )));
+        // Recheck forces analysis and fetches the existing issue from the new destination.
+        let o = h.run(true, &format!("recheck-{mode}"));
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        assert_eq!(h.count(), 1);
+        let report: Value =
+            serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                .unwrap();
+        assert_eq!(report["findings"][0]["status"], "existing");
+    }
 }

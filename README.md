@@ -1,6 +1,6 @@
 # ReviewTriage
 
-TrainLCDのApp Store／Google Playレビューを公式APIから取得し、Codex CLIで現行コードと既存Issue・PRを調べ、未対応の要望・不具合を `TrainLCD/MobileApp` または `TrainLCD/StationAPI` に起票するRust製CLI。
+TrainLCDのApp Store／Google Playレビューを公式APIから取得し、Codex CLIで現行コードと既存Issue・PRを調べ、未対応の要望・不具合を `TrainLCD/MobileApp`、`TrainLCD/StationAPI`、`TrainLCD/Functions`、`TrainLCD/Website` のいずれかに起票するRust製CLI。
 
 ## GitHub Actionsで実行（PC不要）
 
@@ -8,12 +8,14 @@ TrainLCDのApp Store／Google Playレビューを公式APIから取得し、Code
 
 | Secret | 内容 |
 | --- | --- |
-| `REVIEW_TRIAGE_GITHUB_TOKEN` | MobileApp／StationAPIのContents・Pull requestsの読み取りとIssuesの読み書きができるfine-grained PAT |
+| `REVIEW_TRIAGE_GITHUB_TOKEN` | MobileApp／StationAPI／Functions／WebsiteのContents・Pull requestsの読み取りとIssuesの読み書きができるfine-grained PAT |
 | `OPENAI_API_KEY` | Codexで使うOpenAI APIキー（API利用料金が発生） |
 | `ASC_ISSUER_ID` | App Store ConnectのIssuer ID |
 | `ASC_KEY_ID` | App Store ConnectのKey ID |
 | `ASC_PRIVATE_KEY` | App Store Connectの.p8ファイル全文（改行を含む） |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | Google Play用サービスアカウントJSON全文 |
+
+既存のfine-grained PATを使う場合は、対象リポジトリにFunctionsとWebsiteも追加し、上記権限を付与する。GitHub Actionsも同じ4リポジトリを調査・起票対象にする。過去の処理済みレビューを追加先も含めて再評価する場合は `--recheck` を使用する。
 
 ストア側の権限設定は下記「App Store Connect」「Google Play」を参照。標準の `GITHUB_TOKEN` では別リポジトリに起票できないため、専用PATを使用する。秘密鍵やJSONをworkflowの入力欄やリポジトリに貼らない。
 
@@ -37,7 +39,7 @@ artifactの保持は90日（リポジトリ側の上限も適用）。期限切�
 ## 準備
 
 - Rust stable（検証: 1.99.1）、Git、GitHub CLI (`gh`)、Codex CLI、`rg`。
-- `gh auth login`：両リポジトリの読み取りとIssue作成権限。
+- `gh auth login`：対象4リポジトリ（MobileApp／StationAPI／Functions／Website）の読み取りとIssue作成権限。
 - `codex login`：使用するモデルにアクセスできるアカウント。
 - App Store Connect APIキーと、Google Play Developer API用サービスアカウント。
 
@@ -118,9 +120,9 @@ trainlcd-review-triage run --model YOUR_MODEL --batch-size 10 --timeout-seconds 
 | `ignore` | 感想のみ等、対応対象なし |
 | `uncertain` | 再現性、対応状況、担当先、証拠が不足。起票せずレポートに残す |
 
-UI・測位・TTS・クライアントはMobileApp、駅・路線・種別・GTFSデータとAPIはStationAPIへ振り分ける。1レビュー内の複数要望を分け、同じ問題のレビューはまとめる。返信済み／Issueが閉じた事実だけでは修正済みとしない。
+アプリUI・測位・クライアント側TTS再生・ナビゲーションはMobileApp、駅・路線・種別・GTFSデータとAPIはStationAPI、サーバー側TTS生成・認証・フィードバック処理などのバックエンドはFunctions、公式サイトのページ・コンテンツ・Web UIはWebsiteへ振り分ける。TTSなど複数リポジトリに関係する報告は症状だけで決めず、コードの根拠で担当を判定し、特定できなければuncertainとする。1レビュー内の複数要望を分け、同じ問題のレビューはまとめる。返信済み／Issueが閉じた事実だけでは修正済みとしない。
 
-両リポジトリのデフォルトブランチを一時ディレクトリに取得し、全状態のIssue・PR本文をページネーションで収集する。該当するチケットのコメント・PR詳細は追加取得して再評価する。Git履歴は各100コミットまで。足りない証拠から完了や未対応を断定せず、判断保留にする。既存のローカル作業ツリーは変更しない。
+対象4リポジトリ（MobileApp／StationAPI／Functions／Website）のデフォルトブランチを一時ディレクトリに取得し、全状態のIssue・PR本文をページネーションで収集する。該当するチケットのコメント・PR詳細は追加取得して再評価する。Git履歴は各100コミットまで。足りない証拠から完了や未対応を断定せず、判断保留にする。既存のローカル作業ツリーは変更しない。
 
 Codexは読み取り専用で呼び出し、JSON Schemaによる出力をさらにRust側で検証する。全レビューの判定漏れ、未知のレビューID、対象外リポジトリ、存在しないコード位置、未知のIssue URLを拒否する。モデルによる意味的判断自体の正しさは保証できないため、初回はdry-runのレポートを確認する。
 
@@ -128,7 +130,7 @@ Codexは読み取り専用で呼び出し、JSON Schemaによる出力をさら�
 
 ### 起票結果が不明になった場合
 
-通信切断等で `pending-issue.json` が残ったら自動再送しない。その本文の識別マーカーを両リポジトリで確認し、作成済みか未作成かを確定する。確認後にこのファイルを退避して再実行する。作成済みIssueは次回の照合対象になる。成功したPOSTのURLとマーカーは、pendingを削除する前に `created-issues.json` へ原子的に保存する。途中まで作成できたURLはreportにも記録する。state-dirの成功記録は削除せず保持する。
+通信切断等で `pending-issue.json` が残ったら自動再送しない。その本文の識別マーカーを対象4リポジトリ（MobileApp／StationAPI／Functions／Website）で確認し、作成済みか未作成かを確定する。確認後にこのファイルを退避して再実行する。作成済みIssueは次回の照合対象になる。成功したPOSTのURLとマーカーは、pendingを削除する前に `created-issues.json` へ原子的に保存する。途中まで作成できたURLはreportにも記録する。state-dirの成功記録は削除せず保持する。
 
 ### データと認証
 
