@@ -62,7 +62,7 @@ def summarize(log):
             details.append(CAUSES[cause])
         elif re.fullmatch(
             r"(?:gh|git) failed \(exit (?:exit status: [0-9]+|"
-            r"signal: [0-9]+ \((?:SIG[A-Z0-9]+|unknown signal)\)(?: \(core dumped\))?)"
+            r"signal: [0-9]+(?: \(SIG[A-Z0-9]+\))?(?: \(core dumped\))?)"
             r"\); check installation/authentication",
             cause,
         ):

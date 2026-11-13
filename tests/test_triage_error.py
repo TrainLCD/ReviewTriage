@@ -14,7 +14,7 @@ class DiagnosticsTests(unittest.TestCase):
         for program in ("gh", "git"):
             for status in ("signal: 9 (SIGKILL)", "signal: 15 (SIGTERM)",
                            "signal: 11 (SIGSEGV) (core dumped)",
-                           "signal: 35 (unknown signal)"):
+                           "signal: 35", "signal: 35 (core dumped)"):
                 raw = f"{program} failed (exit {status}); check installation/authentication"
                 with self.subTest(program=program, status=status):
                     message = diagnostics.summarize("Error: " + raw)
