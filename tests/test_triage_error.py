@@ -11,6 +11,17 @@ spec.loader.exec_module(diagnostics)
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_japanese_multiline_review_json_is_redacted(self):
+        private = "駅名が違う\n修正して"
+        for ensure_ascii in (True, False):
+            with self.subTest(ensure_ascii=ensure_ascii):
+                body = json.dumps({"text": private}, ensure_ascii=ensure_ascii)
+                message = diagnostics.summarize(self.codex_log(body), [private])
+                self.assertIn("[REDACTED]", message)
+                self.assertNotIn("駅名が違う", message)
+                self.assertNotIn("修正して", message)
+                self.assertNotIn(r"\u99c5", message)
+
 
     def codex_log(self, message, code=1):
         return "\n".join(json.dumps(event) for event in [

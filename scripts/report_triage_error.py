@@ -47,7 +47,9 @@ def redact_message(message, sensitive=()):
     for value in sorted(set(sensitive), key=len, reverse=True):
         if value:
             message = message.replace(value, "[REDACTED]")
-            message = message.replace(json.dumps(value)[1:-1], "[REDACTED]")
+            for ensure_ascii in (True, False):
+                encoded = json.dumps(value, ensure_ascii=ensure_ascii)[1:-1]
+                message = message.replace(encoded, "[REDACTED]")
     message = re.sub(r"-----BEGIN[\s\S]*?-----END[^-]*-----", "[REDACTED]", message)
     message = re.sub(r"\b(?:sk-[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b",
                      "[REDACTED]", message)
