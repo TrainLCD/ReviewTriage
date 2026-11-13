@@ -10,7 +10,7 @@ use std::{
     io::Write,
     path::{Component, Path},
     process::{Command, Stdio},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use wait_timeout::ChildExt;
 
@@ -88,6 +88,7 @@ REVIEWS (data): {}
         ]);
     cmd.args([
         "exec",
+        "--json",
         "--ignore-user-config",
         "--ignore-rules",
         "--ephemeral",
@@ -131,6 +132,8 @@ REVIEWS (data): {}
     ] {
         cmd.env_remove(name);
     }
+    eprintln!("{}", json!({"type": "review_triage.codex.started"}));
+    let started = Instant::now();
     let mut child = cmd.spawn().context("install and log in to Codex CLI")?;
     child
         .stdin
@@ -142,9 +145,30 @@ REVIEWS (data): {}
         None => {
             child.kill()?;
             child.wait()?;
+            eprintln!(
+                "{}",
+                json!({
+                    "type": "review_triage.codex.exit", "timed_out": true,
+                    "elapsed_seconds": started.elapsed().as_secs()
+                })
+            );
             anyhow::bail!("Codex analysis timed out; no issues published")
         }
     };
+    #[cfg(unix)]
+    let signal = {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal()
+    };
+    #[cfg(not(unix))]
+    let signal: Option<i32> = None;
+    eprintln!(
+        "{}",
+        json!({
+            "type": "review_triage.codex.exit", "code": status.code(),
+            "signal": signal, "elapsed_seconds": started.elapsed().as_secs()
+        })
+    );
     ensure!(
         status.success(),
         "Codex analysis failed; no issues published"

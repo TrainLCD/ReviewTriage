@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import json
 
 spec = importlib.util.spec_from_file_location(
     "triage_error", Path(__file__).parents[1] / "scripts/report_triage_error.py"
@@ -10,6 +11,67 @@ spec.loader.exec_module(diagnostics)
 
 
 class DiagnosticsTests(unittest.TestCase):
+
+    def codex_log(self, message, code=1):
+        return "\n".join(json.dumps(event) for event in [
+            {"type": "review_triage.codex.started"},
+            {"type": "turn.failed", "error": {"message": message}},
+            {"type": "review_triage.codex.exit", "code": code, "elapsed_seconds": 12},
+        ]) + "\nError: Codex analysis failed; no issues published\n"
+
+    def test_codex_terminal_error_survives_outer_error(self):
+        message = diagnostics.summarize(self.codex_log("Rate limit reached (429)"))
+        self.assertIn("Rate limit reached (429)", message)
+        self.assertIn("終了コード=1", message)
+        self.assertIn("経過秒=12", message)
+
+    def test_unknown_provider_error_is_preserved(self):
+        self.assertIn("new provider failure",
+                      diagnostics.summarize(self.codex_log("new provider failure")))
+
+    def test_codex_redacts_credentials_and_review_content(self):
+        private = "レビュー固有の本文"
+        message = diagnostics.summarize(self.codex_log(
+            private + " sk-proj-test-secret Bearer xyz person@example.com https://example.com/token?q=secret"
+        ), [private])
+        for value in (private, "sk-proj-test-secret", "xyz", "person@example.com", "q=secret"):
+            self.assertNotIn(value, message)
+        self.assertIn("REDACTED", message)
+
+    def test_codex_ignores_agent_and_tool_output(self):
+        log = "\n".join(json.dumps(event) for event in [
+            {"type": "review_triage.codex.started"},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "private"}},
+            {"type": "item.completed", "item": {"type": "command_execution",
+                                               "aggregated_output": "private"}},
+            {"type": "review_triage.codex.exit", "signal": 9, "elapsed_seconds": 2},
+        ])
+        message = diagnostics.codex_diagnostics(log)
+        self.assertNotIn("private", message)
+        self.assertIn("シグナル=9", message)
+        self.assertIn("構造化エラーイベントなし", message)
+
+    def test_codex_discards_errors_from_prior_batches(self):
+        log = self.codex_log("old failure") + self.codex_log("new failure", 42)
+        message = diagnostics.summarize(log)
+        self.assertIn("new failure", message)
+        self.assertIn("終了コード=42", message)
+        self.assertNotIn("old failure", message)
+
+    def test_codex_error_event_and_malformed_events(self):
+        log = "\n".join([
+            '{"type":"review_triage.codex.started"}', "broken JSON", "[]",
+            '{"type":"error","message":"stream disconnected"}',
+            '{"type":"turn.failed","error":null}',
+        ])
+        self.assertIn("stream disconnected", diagnostics.codex_diagnostics(log))
+
+    def test_codex_control_characters_are_escaped(self):
+        message = diagnostics.summarize(self.codex_log("failure\n::warning::injected"))
+        self.assertNotIn("\n", message)
+        self.assertIn(r"\n", message)
+
+
     def test_signal_failure(self):
         for program in ("gh", "git"):
             for status in ("signal: 9 (SIGKILL)", "signal: 15 (SIGTERM)",
@@ -127,5 +189,6 @@ class DiagnosticsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
