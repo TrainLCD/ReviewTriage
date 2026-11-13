@@ -2,6 +2,38 @@
 
 TrainLCDのApp Store／Google Playレビューを公式APIから取得し、Codex CLIで現行コードと既存Issue・PRを調べ、未対応の要望・不具合を `TrainLCD/MobileApp` または `TrainLCD/StationAPI` に起票するRust製CLI。
 
+## GitHub Actionsで実行（PC不要）
+
+初回だけ、リポジトリの **Settings → Secrets and variables → Actions** に以下のRepository secretsを登録する。
+
+| Secret | 内容 |
+| --- | --- |
+| `REVIEW_TRIAGE_GITHUB_TOKEN` | MobileApp／StationAPIのContents・Pull requestsの読み取りとIssuesの読み書きができるfine-grained PAT |
+| `OPENAI_API_KEY` | Codexで使うOpenAI APIキー（API利用料金が発生） |
+| `ASC_ISSUER_ID` | App Store ConnectのIssuer ID |
+| `ASC_KEY_ID` | App Store ConnectのKey ID |
+| `ASC_PRIVATE_KEY` | App Store Connectの.p8ファイル全文（改行を含む） |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | Google Play用サービスアカウントJSON全文 |
+
+ストア側の権限設定は下記「App Store Connect」「Google Play」を参照。標準の `GITHUB_TOKEN` では別リポジトリに起票できないため、専用PATを使用する。秘密鍵やJSONをworkflowの入力欄やリポジトリに貼らない。
+
+1. **Actions → Review triage → Run workflow** を開く（スマートフォンのブラウザーでも可）。
+2. デフォルトブランチを選ぶ。`apply` をオフにすると解析のみ、オンにすると未対応の要望・不具合を起票する。
+3. 必要なら `recheck` をオンにし、App Storeの地域を `territory` で指定する（既定 `JPN`）。
+4. 完了後、実行画面の **Artifacts → review-triage-state** をダウンロードし、`report.json` で判定・起票結果を確認する。
+
+workflowがデフォルトブランチにマージされると実行ボタンが表示される。Rust・Codex CLI等の準備から実行までGitHubのクラウドで行う。定期実行はせず、ボタン操作で開始する。Google Playの過去CSV取り込みは引き続きローカルCLIを使う。
+
+### 実行状態の引き継ぎと復旧
+
+前回の実行から状態artifactを復元し、失敗時も復元済み状態と途中の起票記録を保存する。同時実行は最大100件を待機させて直列化する。復元元は実際のジョブ完了順で選び、未開始のままキャンセルされた実行は除外する。新しい依頼が先に実行された場合、古い依頼は最新状態を保存して起票前に停止する。デフォルトブランチ以外での実行はスキップする。**再実行は「Re-run jobs」ではなく「Run workflow」で新しい実行を開始する。** ローカルCLIとの同時実行も避ける。
+
+artifactの保持は90日（リポジトリ側の上限も適用）。期限切れ・削除・キャンセルなどで直前のartifactが取得できない場合は、状態を失ったまま起票しないよう停止する。古いartifactへ自動で戻ることもしない。その場合は直前の起票状況を確認し、手元のバックアップから復旧するための保守が必要。初回実行だけは空の状態から開始する。実行履歴・artifactをすべて消して初回扱いにしないこと。
+
+`pending-issue.json` がある場合も自動再送しない。下記「起票結果が不明になった場合」に従って照合・復旧する。Actionsにはこの記録を強制削除するボタンを設けていない。
+
+**この公開リポジトリではartifactも閲覧者がダウンロードできる。** レビュー本文・返信・解析結果が含まれるため、公開できないデータを扱う場合は非公開リポジトリで運用する。認証ファイルはartifactに含めず、Codexの生ログも公開ログへ出力しない。失敗の詳細を調査する場合も、生ログを公開せずに扱う。
+
 ## 準備
 
 - Rust stable（検証: 1.99.1）、Git、GitHub CLI (`gh`)、Codex CLI、`rg`。
@@ -100,7 +132,7 @@ Codexは読み取り専用で呼び出し、JSON Schemaによる出力をさら�
 
 ### データと認証
 
-レビューとGitHubの本文・コードはCodexの解析に渡る。ユーザー名は取得データに保持せず、生のレビュー本文は起票時に自動転載しない。起票本文はAIによる要約なので、個人情報が含まれないかdry-runで確認する。APIトークン・秘密鍵の環境変数はCodex子プロセスへ渡さない。`HOME`・`XDG_CONFIG_HOME` は一時ディレクトリに分離する。`CODEX_HOME` は認証ストレージの識別に必要な元のパスを使い、認証情報をコピー・書き戻ししない。トークン更新はCodex自身が元の保存先へ反映するため、次のバッチ・実行でも更新済み認証を利用する。`config.toml` からは `cli_auth_credentials_store` の `file` / `keyring` / `auto` だけを抽出して明示指定する（省略時はCodexの既定 `file`）。それ以外のユーザー設定とルールは読み込ませず、MCP設定も空にする。`OPENAI_API_KEY` も利用できる。認証更新・失効先URLの上書き環境変数は除去する。元プロファイルのファイルを読み取り不能にする仕組みではなく、他のCodexプロセスとの認証更新の競合はCodex本体の動作に従う。生成結果および起票直前のタイトル・本文でGitHubトークン接頭辞、秘密鍵ヘッダー、private_key、access_token等を検出したら内容を表示せず中止する。HOMEの分離と文字列検査は多層防御であり、絶対パスの読み取りや未知の秘密形式を完全に遮断するものではない。設定ファイル内のモデルを使わないので、モデル指定は `--model` を使う。
+レビューとGitHubの本文・コードはCodexの解析に渡る。ユーザー名は取得データに保持せず、生のレビュー本文は起票時に自動転載しない。起票本文はAIによる要約なので、個人情報が含まれないかdry-runで確認する。APIトークン・秘密鍵の環境変数はCodex子プロセスへ渡さない。`HOME`・`XDG_CONFIG_HOME` は一時ディレクトリに分離する。`CODEX_HOME` は認証ストレージの識別に必要な元のパスを使い、認証情報をコピー・書き戻ししない。トークン更新はCodex自身が元の保存先へ反映するため、次のバッチ・実行でも更新済み認証を利用する。`config.toml` からは `cli_auth_credentials_store` の `file` / `keyring` / `auto` だけを抽出して明示指定する（省略時はCodexの既定 `file`）。それ以外のユーザー設定とルールは読み込ませず、MCP設定も空にする。非対話実行では `CODEX_API_KEY` も利用できる。Actionsでは `OPENAI_API_KEY` Secretをこの環境変数にも渡す。認証更新・失効先URLの上書き環境変数は除去する。元プロファイルのファイルを読み取り不能にする仕組みではなく、他のCodexプロセスとの認証更新の競合はCodex本体の動作に従う。生成結果および起票直前のタイトル・本文でGitHubトークン接頭辞、秘密鍵ヘッダー、private_key、access_token等を検出したら内容を表示せず中止する。HOMEの分離と文字列検査は多層防御であり、絶対パスの読み取りや未知の秘密形式を完全に遮断するものではない。設定ファイル内のモデルを使わないので、モデル指定は `--model` を使う。
 
 ## 開発・検証
 
