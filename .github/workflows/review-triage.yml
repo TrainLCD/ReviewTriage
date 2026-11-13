@@ -1,0 +1,115 @@
+name: Review triage
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Create issues for confirmed unhandled findings
+        type: boolean
+        default: false
+      recheck:
+        description: Reanalyze previously processed reviews
+        type: boolean
+        default: false
+      territory:
+        description: App Store territory (ISO alpha-3)
+        type: string
+        default: JPN
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: review-triage
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Restore previous state
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_RUN_ATTEMPT" != 1 ]]; then
+            echo "::error::Use Run workflow for a new run; reruns cannot safely restore their own previous attempt."
+            exit 1
+          fi
+          mkdir -p state
+          previous=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows/review-triage.yml/runs?branch=$GITHUB_REF_NAME&event=workflow_dispatch&per_page=100" \
+            --jq ".workflow_runs[] | select(.id < $GITHUB_RUN_ID) | .id" | sort -nr | sed -n '1p')
+          if [[ -n "$previous" ]]; then
+            # Never silently start fresh after a failed/cancelled run or expired artifact.
+            gh run download "$previous" --repo "$GITHUB_REPOSITORY" \
+              --name review-triage-state --dir state
+          fi
+          touch state/checkpoint
+          rm -f state/report.json
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install tools and build
+        run: |
+          npm install --global @openai/codex
+          command -v gh
+          command -v rg
+          cargo build --release --locked
+      - name: Run review triage
+        env:
+          GH_TOKEN: ${{ secrets.REVIEW_TRIAGE_GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          APPLY: ${{ inputs.apply }}
+          RECHECK: ${{ inputs.recheck }}
+          TERRITORY: ${{ inputs.territory }}
+        run: |
+          set -euo pipefail
+          for name in GH_TOKEN OPENAI_API_KEY ASC_ISSUER_ID ASC_KEY_ID ASC_PRIVATE_KEY GOOGLE_SERVICE_ACCOUNT_JSON; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing required secret: $name"
+              exit 1
+            fi
+          done
+          [[ "$TERRITORY" =~ ^[A-Z]{3}$ ]] || { echo "::error::Use a three-letter territory such as JPN"; exit 1; }
+          umask 077
+          credentials=$(mktemp -d "$RUNNER_TEMP/review-triage.XXXXXX")
+          trap 'rm -rf "$credentials"' EXIT
+          printf '%s' "$ASC_PRIVATE_KEY" > "$credentials/apple.p8"
+          printf '%s' "$GOOGLE_SERVICE_ACCOUNT_JSON" > "$credentials/google.json"
+          export ASC_PRIVATE_KEY_PATH="$credentials/apple.p8"
+          export GOOGLE_APPLICATION_CREDENTIALS="$credentials/google.json"
+          unset ASC_PRIVATE_KEY GOOGLE_SERVICE_ACCOUNT_JSON
+          args=(run --state-dir state --territory "$TERRITORY")
+          [[ "$APPLY" != true ]] || args+=(--apply)
+          [[ "$RECHECK" != true ]] || args+=(--recheck)
+          # Codex inherits stdout/stderr; keep review text out of public Actions logs.
+          target/release/trainlcd-review-triage "${args[@]}" > "$RUNNER_TEMP/review-triage.log" 2>&1 || {
+            echo "::error::Review triage failed. Inspect the state artifact and credential configuration; raw analysis logs are not published."
+            exit 1
+          }
+      - name: Save state and report
+        if: always() && steps.state.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-triage-state
+          path: state/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Summary
+        if: always()
+        run: |
+          echo '### Review triage' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Download review-triage-state from this run for report.json and recovery state. Check the job result before using the report.' >> "$GITHUB_STEP_SUMMARY"

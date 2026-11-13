@@ -2,6 +2,38 @@
 
 TrainLCDのApp Store／Google Playレビューを公式APIから取得し、Codex CLIで現行コードと既存Issue・PRを調べ、未対応の要望・不具合を `TrainLCD/MobileApp` または `TrainLCD/StationAPI` に起票するRust製CLI。
 
+## GitHub Actionsで実行（PC不要）
+
+初回だけ、リポジトリの **Settings → Secrets and variables → Actions** に以下のRepository secretsを登録する。
+
+| Secret | 内容 |
+| --- | --- |
+| `REVIEW_TRIAGE_GITHUB_TOKEN` | MobileApp／StationAPIのContents・Pull requestsの読み取りとIssuesの読み書きができるfine-grained PAT |
+| `OPENAI_API_KEY` | Codexで使うOpenAI APIキー（API利用料金が発生） |
+| `ASC_ISSUER_ID` | App Store ConnectのIssuer ID |
+| `ASC_KEY_ID` | App Store ConnectのKey ID |
+| `ASC_PRIVATE_KEY` | App Store Connectの.p8ファイル全文（改行を含む） |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | Google Play用サービスアカウントJSON全文 |
+
+ストア側の権限設定は下記「App Store Connect」「Google Play」を参照。標準の `GITHUB_TOKEN` では別リポジトリに起票できないため、専用PATを使用する。秘密鍵やJSONをworkflowの入力欄やリポジトリに貼らない。
+
+1. **Actions → Review triage → Run workflow** を開く（スマートフォンのブラウザーでも可）。
+2. デフォルトブランチを選ぶ。`apply` をオフにすると解析のみ、オンにすると未対応の要望・不具合を起票する。
+3. 必要なら `recheck` をオンにし、App Storeの地域を `territory` で指定する（既定 `JPN`）。
+4. 完了後、実行画面の **Artifacts → review-triage-state** をダウンロードし、`report.json` で判定・起票結果を確認する。
+
+workflowがデフォルトブランチにマージされると実行ボタンが表示される。Rust・Codex CLI等の準備から実行までGitHubのクラウドで行う。定期実行はせず、ボタン操作で開始する。Google Playの過去CSV取り込みは引き続きローカルCLIを使う。
+
+### 実行状態の引き継ぎと復旧
+
+前回の実行から状態artifactを復元し、失敗時も復元済み状態と途中の起票記録を保存する。同時実行は直列化する。デフォルトブランチ以外での実行はスキップする。**再実行は「Re-run jobs」ではなく「Run workflow」で新しい実行を開始する。** ローカルCLIとの同時実行も避ける。
+
+artifactの保持は90日（リポジトリ側の上限も適用）。期限切れ・削除・キャンセルなどで直前のartifactが取得できない場合は、状態を失ったまま起票しないよう停止する。古いartifactへ自動で戻ることもしない。その場合は直前の起票状況を確認し、手元のバックアップから復旧するための保守が必要。初回実行だけは空の状態から開始する。実行履歴・artifactをすべて消して初回扱いにしないこと。
+
+`pending-issue.json` がある場合も自動再送しない。下記「起票結果が不明になった場合」に従って照合・復旧する。Actionsにはこの記録を強制削除するボタンを設けていない。
+
+**この公開リポジトリではartifactも閲覧者がダウンロードできる。** レビュー本文・返信・解析結果が含まれるため、公開できないデータを扱う場合は非公開リポジトリで運用する。認証ファイルはartifactに含めず、Codexの生ログも公開ログへ出力しない。失敗の詳細を調査する場合も、生ログを公開せずに扱う。
+
 ## 準備
 
 - Rust stable（検証: 1.99.1）、Git、GitHub CLI (`gh`)、Codex CLI、`rg`。
