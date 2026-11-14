@@ -69,6 +69,9 @@ elif name=='codex':
   sys.exit(42)
  if mode=='timeout':
   import time;time.sleep(30)
+ if mode!='no-commands':
+  failed=mode=='sandbox-failure'
+  print(json.dumps({'type':'item.completed','item':{'type':'command_execution','status':'failed' if failed else 'completed','exit_code':1 if failed else 0,'aggregated_output':'bwrap: creating namespace failed' if failed else ''}}))
  findings=[]
  destination='TrainLCD/'+mode[6:] if mode.startswith('route-') else 'TrainLCD/StationAPI'
  if mode.startswith('route-'):
@@ -388,4 +391,23 @@ fn persistent_duplicate_topics_stop_without_publishing() {
         "3"
     );
     assert!(!h.dir.path().join("state/report.json").exists());
+}
+
+#[test]
+fn sandbox_failure_or_missing_execution_cannot_publish_or_mark_processed() {
+    for mode in ["sandbox-failure", "no-commands"] {
+        let h = Harness::new();
+        let output = h.run(true, mode);
+        assert!(!output.status.success());
+        assert!(!h.dir.path().join("issues.json").exists());
+        assert!(!h.dir.path().join("state/processed.json").exists());
+        assert!(!h.dir.path().join("state/report.json").exists());
+        // The same review remains eligible and succeeds on a healthy retry.
+        let retry = h.run(true, "normal");
+        assert!(
+            retry.status.success(),
+            "{}",
+            String::from_utf8_lossy(&retry.stderr)
+        );
+    }
 }

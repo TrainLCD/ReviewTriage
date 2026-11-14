@@ -16,3 +16,15 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+
+  sandbox:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: sudo apt-get update && sudo apt-get install --yes bubblewrap
+      - run: npm install --global @openai/codex
+      - name: Verify read-only sandbox without API credentials
+        run: timeout 30s codex sandbox linux -c 'sandbox_mode="read-only"' -- /bin/cat Cargo.toml > /dev/null
