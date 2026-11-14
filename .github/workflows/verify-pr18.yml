@@ -1,0 +1,63 @@
+name: PR18 live review verification
+on:
+  push:
+    branches: [verify/triage-pr18]
+    paths: [.github/workflows/verify-pr18.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: sudo apt-get update && sudo apt-get install --yes ripgrep bubblewrap
+      - run: npm install --global @openai/codex
+      - run: cargo build --release --locked
+      - run: timeout 30s codex sandbox -c 'sandbox_mode="read-only"' -- /bin/cat Cargo.toml > /dev/null
+      - name: Load real reviews from the affected run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 43567026780 --repo TrainLCD/ReviewTriage --name review-triage-state --dir previous
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          rows = json.loads(Path('previous/reviews.json').read_text())
+          rows = sorted(rows, key=lambda row: row['updated_at'], reverse=True)[:3]
+          Path('input.json').write_text(json.dumps(rows, ensure_ascii=False))
+          print(f'Replaying {len(rows)} latest real reviews; no store credentials or publishing.')
+          PY
+      - name: Analyze real reviews without publishing
+        env:
+          GH_TOKEN: ${{ secrets.REVIEW_TRIAGE_GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          target/release/trainlcd-review-triage run --input input.json --state-dir verification-state > "$RUNNER_TEMP/triage.log" 2>&1 || {
+            python3 scripts/report_triage_error.py "$RUNNER_TEMP/triage.log"
+            exit 1
+          }
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from collections import Counter
+          r = json.loads(Path('verification-state/report.json').read_text())
+          assert r['apply'] is False and not r['created_issues']
+          assert not Path('verification-state/processed.json').exists()
+          print(json.dumps({'reviews': r['review_count'], 'statuses': dict(Counter(f['status'] for f in r['findings'])), 'evidence_count': sum(len(f['evidence']) for f in r['findings'])}))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr18-verification-report
+          path: verification-state/report.json
+          if-no-files-found: ignore
+          retention-days: 7
