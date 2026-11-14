@@ -22,6 +22,22 @@ jobs:
       - run: npm install --global @openai/codex
       - run: cargo build --release --locked
       - run: timeout 30s codex sandbox -c 'sandbox_mode="read-only"' -- /bin/cat Cargo.toml > /dev/null
+      - name: Probe analysis tool execution
+        env:
+          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          probe_dir=$(mktemp -d)
+          mkdir -p "$probe_dir/home" "$probe_dir/config" "$probe_dir/codex"
+          HOME="$probe_dir/home" XDG_CONFIG_HOME="$probe_dir/config" CODEX_HOME="$probe_dir/codex" timeout 120s codex exec --json --ignore-user-config --ignore-rules --ephemeral --sandbox read-only --skip-git-repo-check -c shell_environment_policy.inherit=none -c 'mcp_servers={}' 'Run cat Cargo.toml using a shell tool. Report whether it succeeded. Do not modify files or use network.' > "$RUNNER_TEMP/probe.jsonl" 2>&1
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          for line in Path(os.environ['RUNNER_TEMP']+'/probe.jsonl').read_text().splitlines():
+              try: e=json.loads(line)
+              except ValueError: continue
+              item=e.get('item', {})
+              print(json.dumps({'type':e.get('type'), 'item_type':item.get('type'), 'keys':list(item), 'status':item.get('status'), 'exit_code':item.get('exit_code'), 'tool':item.get('tool'), 'server':item.get('server'), 'bwrap': 'bwrap' in line, 'permission_denied':'Operation not permitted' in line}))
+          PY
       - name: Load real reviews from the affected run
         env:
           GH_TOKEN: ${{ github.token }}
