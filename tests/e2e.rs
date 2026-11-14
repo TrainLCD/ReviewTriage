@@ -43,7 +43,7 @@ elif name=='codex':
  assert pathlib.Path(os.environ['XDG_CONFIG_HOME']).is_dir()
  codex_home=pathlib.Path(os.environ['CODEX_HOME'])
  assert codex_home == root/'original-codex'
- assert '--ignore-user-config' in args and '--ignore-rules' in args
+ assert '--ignore-user-config' in args and '--ignore-rules' in args and '--json' in args
  store=next(a for a in args if a.startswith('cli_auth_credentials_store='))
  if mode=='keyring':
   assert store=='cli_auth_credentials_store="keyring"'
@@ -64,6 +64,9 @@ elif name=='codex':
  reviews=json.loads(prompt.split('REVIEWS (data): ')[-1])
  workspace=pathlib.Path(args[args.index('--cd')+1])
  known=json.loads((workspace/'github-context.json').read_text())
+ if mode=='codex-failure':
+  print(json.dumps({'type':'turn.failed','error':{'message':'test provider failure'}}))
+  sys.exit(42)
  if mode=='timeout':
   import time;time.sleep(30)
  findings=[]
@@ -335,4 +338,21 @@ fn added_destinations_support_evidence_and_existing_issue_deduplication() {
                 .unwrap();
         assert_eq!(report["findings"][0]["status"], "existing");
     }
+}
+
+#[test]
+fn codex_failure_records_terminal_event_and_exit_status_without_posting() {
+    let h = Harness::new();
+    let output = h.run(true, "codex-failure");
+    assert!(!output.status.success());
+    assert_eq!(h.count(), 0);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("test provider failure"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let exit = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| event["type"] == "review_triage.codex.exit")
+        .unwrap();
+    assert_eq!(exit["code"], 42);
+    assert!(stderr.contains("Codex analysis failed; no issues published"));
 }
