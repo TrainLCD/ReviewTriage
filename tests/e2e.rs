@@ -87,6 +87,11 @@ elif name=='codex':
    'repository':destination,'title':'駅名の誤記を修正','body':'報告された駅名を確認して修正する。','reason':'現行コードに誤記がある。',
    'evidence':[{'repository':destination,'path':'source.rs','line':1,'explanation':'駅名の定義'}],
    'related_urls':[known[0]['url']] if known else []})
+ if mode in ['duplicate-once','duplicate-always']:
+  if mode=='duplicate-always' or int(calls.read_text())==1:
+   findings.append(dict(findings[0]))
+  else:
+   assert 'Your previous response repeated' in prompt
  if mode.startswith('secret-'):
   field=mode[7:]
   if field=='explanation': findings[0]['evidence'][0][field]='ghp_not_a_real_secret'
@@ -355,4 +360,32 @@ fn codex_failure_records_terminal_event_and_exit_status_without_posting() {
         .unwrap();
     assert_eq!(exit["code"], 42);
     assert!(stderr.contains("Codex analysis failed; no issues published"));
+}
+
+#[test]
+fn duplicate_topics_are_retried_before_publishing() {
+    let h = Harness::new();
+    let output = h.run(true, "duplicate-once");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(h.count(), 1);
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "2"
+    );
+}
+
+#[test]
+fn persistent_duplicate_topics_stop_without_publishing() {
+    let h = Harness::new();
+    assert!(!h.run(true, "duplicate-always").status.success());
+    assert_eq!(h.count(), 0);
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "3"
+    );
+    assert!(!h.dir.path().join("state/report.json").exists());
 }
