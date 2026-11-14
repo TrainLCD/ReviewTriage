@@ -11,6 +11,12 @@ spec.loader.exec_module(diagnostics)
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_sandbox_failure_has_fixed_diagnostic(self):
+        for error in ("analysis sandbox failed; no issues published",
+                      "analysis commands never succeeded; no issues published"):
+            message = diagnostics.summarize("Error: " + error)
+            self.assertNotIn("許可済み診断項目に該当しない", message)
+
     def test_japanese_multiline_review_json_is_redacted(self):
         private = "駅名が違う\n修正して"
         for ensure_ascii in (True, False):

@@ -154,3 +154,10 @@ E2EテストはPython 3製の偽 `gh` / `git` / `codex` を使用し、外部通
 - [Google Play Reviews APIと1週間の制約](https://developers.google.com/android-publisher/reply-to-reviews)
 - [公式レビューCSV形式](https://support.google.com/googleplay/android-developer/answer/6135870)
 - [Codex非対話実行](https://developers.openai.com/codex/noninteractive/)
+
+### 解析環境の起動確認
+
+Actionsではシステムの `bubblewrap` をインストールし、認証情報を渡す前に `codex sandbox` で読み取り専用コマンドの起動を確認する。サンドボックスの制限は解除しない。
+Codexが正常終了しても、JSONイベントに成功したコマンド実行が一件もない場合や、失敗したコマンドに `bwrap` の起動エラーがある場合は解析失敗とする。Issue作成・処理済み状態の更新より前に停止し、次回実行で再解析する。通常の証拠不足による `uncertain` は引き続き有効な判定として扱う。
+
+解析コマンドには `inherit=none` を維持しつつ `PATH` のみ明示的に渡す。PATHまで除去するとシステムのbubblewrapを選べず、Ubuntuで同梱バイナリの起動が拒否される場合がある。事前検証も同じ環境変数方針で実行する。

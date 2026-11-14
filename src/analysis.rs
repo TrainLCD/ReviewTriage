@@ -7,7 +7,7 @@ use serde_json::json;
 use std::{
     collections::HashSet,
     fs,
-    io::Write,
+    io::{BufRead, BufReader, Write},
     path::{Component, Path},
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -40,6 +40,7 @@ pub fn analyze(
     let profile = crate::security::isolated_home(temp.path())?;
     let schema_path = temp.path().join("schema.json");
     let result_path = temp.path().join("result.json");
+    let events_path = temp.path().join("events.jsonl");
     fs::write(&schema_path, serde_json::to_vec(&schema(reviews))?)?;
     let review_inputs: Vec<_> = reviews
         .iter()
@@ -110,6 +111,13 @@ REVIEWS (data): {}
         "-c",
         "shell_environment_policy.inherit=none",
         "-c",
+        &format!(
+            "shell_environment_policy.set.PATH={}",
+            serde_json::to_string(
+                &std::env::var("PATH").context("PATH is required for analysis tools")?
+            )?
+        ),
+        "-c",
         "mcp_servers={}",
         "-",
     ])
@@ -139,6 +147,8 @@ REVIEWS (data): {}
         if result_path.exists() {
             fs::remove_file(&result_path)?;
         }
+        // A file avoids pipe backpressure while preserving the existing timeout.
+        cmd.stdout(Stdio::from(fs::File::create(&events_path)?));
         eprintln!("{}", json!({"type": "review_triage.codex.started"}));
         let started = Instant::now();
         let mut child = cmd.spawn().context("install and log in to Codex CLI")?;
@@ -164,6 +174,9 @@ REVIEWS (data): {}
                 anyhow::bail!("Codex analysis timed out; no issues published")
             }
         };
+        let events = fs::read_to_string(&events_path)?;
+        print!("{events}");
+        std::io::stdout().flush()?;
         #[cfg(unix)]
         let signal = {
             use std::os::unix::process::ExitStatusExt;
@@ -182,6 +195,7 @@ REVIEWS (data): {}
             status.success(),
             "Codex analysis failed; no issues published"
         );
+        validate_execution(BufReader::new(events.as_bytes()))?;
         let analysis: Analysis = serde_json::from_slice(
             &fs::read(&result_path).context("Codex did not produce a result")?,
         )?;
@@ -200,6 +214,35 @@ REVIEWS (data): {}
         }
     }
     unreachable!("final validation attempt returns")
+}
+
+// Exit code zero only means Codex produced an answer, not that its tools worked.
+fn validate_execution(events: impl BufRead) -> Result<()> {
+    let mut succeeded = false;
+    for line in events.lines() {
+        let line = line?;
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if event["type"] != "item.completed" || event["item"]["type"] != "command_execution" {
+            continue;
+        }
+        let item = &event["item"];
+        if item["exit_code"] == 0 && item["status"] == "completed" {
+            succeeded = true;
+        } else {
+            let output = item["aggregated_output"].as_str().unwrap_or_default();
+            ensure!(
+                !output.contains("bwrap:") && !output.contains("error building bubblewrap command"),
+                "analysis sandbox failed; no issues published"
+            );
+        }
+    }
+    ensure!(
+        succeeded,
+        "analysis commands never succeeded; no issues published"
+    );
+    Ok(())
 }
 
 pub fn validate(

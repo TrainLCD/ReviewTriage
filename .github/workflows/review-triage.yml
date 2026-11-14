@@ -63,16 +63,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Install ripgrep
+      - name: Install sandbox and search tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes ripgrep
+          sudo apt-get install --yes ripgrep bubblewrap
       - name: Install tools and build
         run: |
           npm install --global @openai/codex
           command -v gh
           command -v rg
           cargo build --release --locked
+      - name: Verify read-only sandbox
+        run: |
+          timeout 30s codex sandbox -c 'sandbox_mode="read-only"' -c shell_environment_policy.inherit=none -c "shell_environment_policy.set.PATH=\"$PATH\"" -- /bin/cat Cargo.toml > /dev/null
       - name: Run review triage
         env:
           GH_TOKEN: ${{ secrets.REVIEW_TRIAGE_GITHUB_TOKEN }}

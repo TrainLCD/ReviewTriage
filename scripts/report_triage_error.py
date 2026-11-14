@@ -14,6 +14,8 @@ STAGES = {
     "install and log in to Codex CLI": "Codex CLI起動",
 }
 CAUSES = {
+    "analysis sandbox failed; no issues published": "解析用サンドボックスの起動失敗",
+    "analysis commands never succeeded; no issues published": "解析用コマンドが一度も成功していない",
     "invalid destination": "解析結果の起票先が不正",
     "invalid topic": "解析結果のトピックが不正",
     "duplicate topic in batch; retry analysis": "同一バッチ内でトピックが重複",

@@ -56,6 +56,8 @@ elif name=='codex':
    generation.write_text(str(expected+1))
    (codex_home/'auth.json').write_text(json.dumps({'generation':expected+1}))
   else: assert auth=={'test':'auth-only'}
+ assert any(a.startswith('shell_environment_policy.set.PATH=') for a in args)
+ assert 'shell_environment_policy.inherit=none' in args
  assert 'GH_TOKEN' not in os.environ
  assert 'CODEX_REFRESH_TOKEN_URL_OVERRIDE' not in os.environ
  assert 'CODEX_REVOKE_TOKEN_URL_OVERRIDE' not in os.environ
@@ -69,6 +71,13 @@ elif name=='codex':
   sys.exit(42)
  if mode=='timeout':
   import time;time.sleep(30)
+ if mode=='success-then-sandbox':
+  print(json.dumps({'type':'item.completed','item':{'type':'command_execution','status':'completed','exit_code':0,'aggregated_output':''}}))
+ if mode!='no-commands':
+  failed=mode in ['sandbox-failure','success-then-sandbox','sandbox-then-success']
+  print(json.dumps({'type':'item.completed','item':{'type':'command_execution','status':'failed' if failed else 'completed','exit_code':1 if failed else 0,'aggregated_output':'bwrap: creating namespace failed' if failed else ''}}))
+ if mode=='sandbox-then-success':
+  print(json.dumps({'type':'item.completed','item':{'type':'command_execution','status':'completed','exit_code':0,'aggregated_output':''}}))
  findings=[]
  destination='TrainLCD/'+mode[6:] if mode.startswith('route-') else 'TrainLCD/StationAPI'
  if mode.startswith('route-'):
@@ -388,4 +397,28 @@ fn persistent_duplicate_topics_stop_without_publishing() {
         "3"
     );
     assert!(!h.dir.path().join("state/report.json").exists());
+}
+
+#[test]
+fn sandbox_failure_or_missing_execution_cannot_publish_or_mark_processed() {
+    for mode in [
+        "sandbox-failure",
+        "no-commands",
+        "success-then-sandbox",
+        "sandbox-then-success",
+    ] {
+        let h = Harness::new();
+        let output = h.run(true, mode);
+        assert!(!output.status.success());
+        assert!(!h.dir.path().join("issues.json").exists());
+        assert!(!h.dir.path().join("state/processed.json").exists());
+        assert!(!h.dir.path().join("state/report.json").exists());
+        // The same review remains eligible and succeeds on a healthy retry.
+        let retry = h.run(true, "normal");
+        assert!(
+            retry.status.success(),
+            "{}",
+            String::from_utf8_lossy(&retry.stderr)
+        );
+    }
 }
