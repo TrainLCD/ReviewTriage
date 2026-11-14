@@ -68,6 +68,8 @@ For new/resolved provide real repository-relative source path and 1-based line w
 For new provide a concise title and body describing observed/requested behavior, expected behavior, reported version/date,
 investigation and acceptance criteria. Clearly mark review claims and unverified reproduction. Exclude usernames and personal data.
 Use a stable lowercase hyphenated topic key per underlying concern. Cover every input review key at least once.
+Return at most one finding per (repository, topic) in this batch. Combine all matching review_keys into that finding.
+If reviews disagree about the same concern and you cannot reconcile their status from evidence, use uncertain.
 Check prior findings below to avoid duplicates across batches. If a prior new finding covers this review, use existing with no related URL
 and exactly the same repository and topic as that prior finding (the CLI will merge source review references).
 Copy review_keys exactly from each input's review_key field. Do not use the bare review.id or keys from prior batches.
@@ -132,51 +134,72 @@ REVIEWS (data): {}
     ] {
         cmd.env_remove(name);
     }
-    eprintln!("{}", json!({"type": "review_triage.codex.started"}));
-    let started = Instant::now();
-    let mut child = cmd.spawn().context("install and log in to Codex CLI")?;
-    child
-        .stdin
-        .take()
-        .context("missing codex stdin")?
-        .write_all(prompt.as_bytes())?;
-    let status = match child.wait_timeout(Duration::from_secs(timeout))? {
-        Some(s) => s,
-        None => {
-            child.kill()?;
-            child.wait()?;
-            eprintln!(
-                "{}",
-                json!({
-                    "type": "review_triage.codex.exit", "timed_out": true,
-                    "elapsed_seconds": started.elapsed().as_secs()
-                })
-            );
-            anyhow::bail!("Codex analysis timed out; no issues published")
+    // A malformed model result can be repaired, but never bypass validation.
+    for attempt in 0..3 {
+        if result_path.exists() {
+            fs::remove_file(&result_path)?;
         }
-    };
-    #[cfg(unix)]
-    let signal = {
-        use std::os::unix::process::ExitStatusExt;
-        status.signal()
-    };
-    #[cfg(not(unix))]
-    let signal: Option<i32> = None;
-    eprintln!(
-        "{}",
-        json!({
-            "type": "review_triage.codex.exit", "code": status.code(),
-            "signal": signal, "elapsed_seconds": started.elapsed().as_secs()
-        })
-    );
-    ensure!(
-        status.success(),
-        "Codex analysis failed; no issues published"
-    );
-    let analysis: Analysis =
-        serde_json::from_slice(&fs::read(result_path).context("Codex did not produce a result")?)?;
-    validate(&analysis, reviews, issues, prior, workspace)?;
-    Ok(analysis)
+        eprintln!("{}", json!({"type": "review_triage.codex.started"}));
+        let started = Instant::now();
+        let mut child = cmd.spawn().context("install and log in to Codex CLI")?;
+        {
+            let mut stdin = child.stdin.take().context("missing codex stdin")?;
+            if attempt > 0 {
+                stdin.write_all(b"Your previous response repeated a (repository, topic) pair. Reanalyze this batch and return exactly one finding per pair, combining review_keys. Preserve every distinct concern; do not rename topics just to bypass uniqueness. Use uncertain if conflicting statuses cannot be reconciled.\n")?;
+            }
+            stdin.write_all(prompt.as_bytes())?;
+        }
+        let status = match child.wait_timeout(Duration::from_secs(timeout))? {
+            Some(s) => s,
+            None => {
+                child.kill()?;
+                child.wait()?;
+                eprintln!(
+                    "{}",
+                    json!({
+                        "type": "review_triage.codex.exit", "timed_out": true,
+                        "elapsed_seconds": started.elapsed().as_secs()
+                    })
+                );
+                anyhow::bail!("Codex analysis timed out; no issues published")
+            }
+        };
+        #[cfg(unix)]
+        let signal = {
+            use std::os::unix::process::ExitStatusExt;
+            status.signal()
+        };
+        #[cfg(not(unix))]
+        let signal: Option<i32> = None;
+        eprintln!(
+            "{}",
+            json!({
+                "type": "review_triage.codex.exit", "code": status.code(),
+                "signal": signal, "elapsed_seconds": started.elapsed().as_secs()
+            })
+        );
+        ensure!(
+            status.success(),
+            "Codex analysis failed; no issues published"
+        );
+        let analysis: Analysis = serde_json::from_slice(
+            &fs::read(&result_path).context("Codex did not produce a result")?,
+        )?;
+        match validate(&analysis, reviews, issues, prior, workspace) {
+            Ok(()) => return Ok(analysis),
+            Err(error)
+                if error.to_string() == "duplicate topic in batch; retry analysis"
+                    && attempt < 2 =>
+            {
+                eprintln!(
+                    "Duplicate topics in analysis; retrying batch ({}/2)",
+                    attempt + 1
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("final validation attempt returns")
 }
 
 pub fn validate(
