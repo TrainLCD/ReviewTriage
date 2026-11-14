@@ -28,7 +28,7 @@ jobs:
         run: |
           probe_dir=$(mktemp -d)
           mkdir -p "$probe_dir/home" "$probe_dir/config" "$probe_dir/codex"
-          HOME="$probe_dir/home" XDG_CONFIG_HOME="$probe_dir/config" CODEX_HOME="$probe_dir/codex" timeout 120s codex exec --json --ignore-user-config --ignore-rules --ephemeral --sandbox read-only --skip-git-repo-check -c shell_environment_policy.inherit=none -c 'mcp_servers={}' 'Run cat Cargo.toml using a shell tool. Report whether it succeeded. Do not modify files or use network.' > "$RUNNER_TEMP/probe.jsonl" 2>&1
+          HOME="$probe_dir/home" XDG_CONFIG_HOME="$probe_dir/config" CODEX_HOME="$probe_dir/codex" timeout 120s codex exec --json --ignore-user-config --ignore-rules --ephemeral --sandbox read-only --skip-git-repo-check -c shell_environment_policy.inherit=none -c "shell_environment_policy.set.PATH=\"$PATH\"" -c 'mcp_servers={}' 'Run cat Cargo.toml using a shell tool. Report whether it succeeded. Do not modify files or use network.' > "$RUNNER_TEMP/probe.jsonl" 2>&1
           python3 - <<'PY'
           import json, os
           from pathlib import Path
@@ -70,10 +70,46 @@ jobs:
           assert not Path('verification-state/processed.json').exists()
           print(json.dumps({'reviews': r['review_count'], 'statuses': dict(Counter(f['status'] for f in r['findings'])), 'evidence_count': sum(len(f['evidence']) for f in r['findings'])}))
           PY
+      - name: Verify apply path with already handled reviews
+        env:
+          GH_TOKEN: ${{ secrets.REVIEW_TRIAGE_GITHUB_TOKEN }}
+          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          r=json.loads(Path('verification-state/report.json').read_text())
+          eligible={k for f in r['findings'] if f['status'] in ['existing','resolved'] for k in f['review_keys']}
+          blocked={k for f in r['findings'] if f['status'] in ['new','uncertain'] for k in f['review_keys']}
+          rows=json.loads(Path('input.json').read_text())
+          rows=[r for r in rows if r['store']+':'+r['id'] in eligible-blocked]
+          assert rows, 'No conclusively handled review available for apply verification'
+          Path('apply-input.json').write_text(json.dumps(rows))
+          PY
+          # Refuse writes in this verification run, even if a second analysis changes its decision.
+          mkdir -p verify-bin
+          real_gh=$(command -v gh)
+          printf '#!/bin/bash\nfor arg in "$@"; do\n case "$arg" in POST|PATCH|PUT|DELETE|--method=*) exit 97;; esac\ndone\nexec "%s" "$@"\n' "$real_gh" > verify-bin/gh
+          chmod +x verify-bin/gh
+          PATH="$PWD/verify-bin:$PATH" target/release/trainlcd-review-triage run --input apply-input.json --state-dir apply-state --apply > "$RUNNER_TEMP/apply.log" 2>&1 || {
+            python3 scripts/report_triage_error.py "$RUNNER_TEMP/apply.log"
+            exit 1
+          }
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          r=json.loads(Path('apply-state/report.json').read_text())
+          p=json.loads(Path('apply-state/processed.json').read_text())
+          assert r['apply'] is True and not r['created_issues']
+          assert len(p)==r['review_count'] and len(p)>0
+          print(f"Apply verified: {len(p)} reviews marked processed; zero issues created.")
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: pr18-verification-report
-          path: verification-state/report.json
+          path: |
+            verification-state/report.json
+            apply-state/report.json
           if-no-files-found: ignore
           retention-days: 7

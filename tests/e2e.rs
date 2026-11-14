@@ -56,6 +56,8 @@ elif name=='codex':
    generation.write_text(str(expected+1))
    (codex_home/'auth.json').write_text(json.dumps({'generation':expected+1}))
   else: assert auth=={'test':'auth-only'}
+ assert any(a.startswith('shell_environment_policy.set.PATH=') for a in args)
+ assert 'shell_environment_policy.inherit=none' in args
  assert 'GH_TOKEN' not in os.environ
  assert 'CODEX_REFRESH_TOKEN_URL_OVERRIDE' not in os.environ
  assert 'CODEX_REVOKE_TOKEN_URL_OVERRIDE' not in os.environ
