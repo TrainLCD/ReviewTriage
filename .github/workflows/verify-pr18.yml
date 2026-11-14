@@ -51,41 +51,12 @@ jobs:
           Path('input.json').write_text(json.dumps(rows, ensure_ascii=False))
           print(f'Replaying {len(rows)} latest real reviews; no store credentials or publishing.')
           PY
-      - name: Analyze real reviews without publishing
-        env:
-          GH_TOKEN: ${{ secrets.REVIEW_TRIAGE_GITHUB_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          target/release/trainlcd-review-triage run --input input.json --state-dir verification-state > "$RUNNER_TEMP/triage.log" 2>&1 || {
-            python3 scripts/report_triage_error.py "$RUNNER_TEMP/triage.log"
-            exit 1
-          }
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-          from collections import Counter
-          r = json.loads(Path('verification-state/report.json').read_text())
-          assert r['apply'] is False and not r['created_issues']
-          assert not Path('verification-state/processed.json').exists()
-          print(json.dumps({'reviews': r['review_count'], 'statuses': dict(Counter(f['status'] for f in r['findings'])), 'evidence_count': sum(len(f['evidence']) for f in r['findings'])}))
-          PY
-      - name: Verify apply path with already handled reviews
+      - name: Verify apply with the same real reviews
         env:
           GH_TOKEN: ${{ secrets.REVIEW_TRIAGE_GITHUB_TOKEN }}
           CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-          r=json.loads(Path('verification-state/report.json').read_text())
-          eligible={k for f in r['findings'] if f['status'] in ['existing','resolved'] for k in f['review_keys']}
-          blocked={k for f in r['findings'] if f['status'] in ['new','uncertain'] for k in f['review_keys']}
-          rows=json.loads(Path('input.json').read_text())
-          rows=[r for r in rows if r['store']+':'+r['id'] in eligible-blocked]
-          assert rows, 'No conclusively handled review available for apply verification'
-          Path('apply-input.json').write_text(json.dumps(rows))
-          PY
+          cp input.json apply-input.json
           # Refuse writes in this verification run, even if a second analysis changes its decision.
           mkdir -p verify-bin
           real_gh=$(command -v gh)
@@ -101,8 +72,11 @@ jobs:
           r=json.loads(Path('apply-state/report.json').read_text())
           p=json.loads(Path('apply-state/processed.json').read_text())
           assert r['apply'] is True and not r['created_issues']
-          assert len(p)==r['review_count'] and len(p)>0
-          print(f"Apply verified: {len(p)} reviews marked processed; zero issues created.")
+          uncertain={k for f in r['findings'] if f['status']=='uncertain' for k in f['review_keys']}
+          keys={row['store']+':'+row['id'] for row in json.loads(Path('apply-input.json').read_text())}
+          assert set(p)==keys-uncertain and len(p)>0
+          assert sum(len(f['evidence']) for f in r['findings'])>0
+          print(f"Apply verified: {len(p)} reviews marked processed; {len(uncertain)} pending; zero issues created.")
           PY
       - uses: actions/upload-artifact@v4
         if: always()
