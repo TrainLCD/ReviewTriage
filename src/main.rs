@@ -197,33 +197,35 @@ fn main() -> Result<()> {
             for (index, batch) in reviews.chunks(batch_size.into()).enumerate() {
                 eprintln!("Analyzing batch {}…", index + 1);
                 let result = (|| -> Result<model::Analysis> {
+                    let mut session =
+                        analysis::BatchAnalysis::new(model.as_deref(), timeout_seconds);
                     let mut result = analysis::analyze(
                         workspace.path(),
                         batch,
                         &issues,
                         &findings,
-                        model.as_deref(),
-                        timeout_seconds,
+                        &mut session,
                     )?;
                     // Fetch full discussions/PR metadata only for actual matches, not thousands
                     // of unrelated historical PR threads.
-                    let refs: std::collections::HashSet<_> = result
-                        .findings
-                        .iter()
-                        .flat_map(|f| f.related_urls.iter().cloned())
-                        .collect();
-                    if !refs.is_empty() {
-                        let details = github::reference_details(&issues, &refs)?;
+                    let mut inspected = std::collections::HashSet::new();
+                    let mut discussion_passes = 0;
+                    while !session.candidate_urls.is_subset(&inspected) {
+                        ensure!(
+                            discussion_passes < 3,
+                            "discussion candidates did not converge"
+                        );
+                        discussion_passes += 1;
+                        let details = github::reference_details(&issues, &session.candidate_urls)?;
+                        inspected = session.candidate_urls.clone();
                         atomic_json(&workspace.path().join("matched-discussions.json"), &details)?;
                         result = analysis::analyze(
                             workspace.path(),
                             batch,
                             &issues,
                             &findings,
-                            model.as_deref(),
-                            timeout_seconds,
+                            &mut session,
                         )?;
-                        fs::remove_file(workspace.path().join("matched-discussions.json"))?;
                     }
                     Ok(result)
                 })();
@@ -236,9 +238,15 @@ fn main() -> Result<()> {
                 let result = match result {
                     Ok(result) => result,
                     Err(error) => {
+                        let (invalid_lines, empty_explanations) =
+                            analysis::evidence_failure_counts(&error);
                         let keys: Vec<_> = batch.iter().map(Review::key).collect();
                         failed_keys.extend(keys.iter().cloned());
-                        batch_failures.push(json!({"batch":index + 1,"review_keys":keys}));
+                        batch_failures.push(json!({"batch":index + 1,"review_keys":keys,"invalid_lines":invalid_lines,"empty_explanations":empty_explanations}));
+                        eprintln!(
+                            "{}",
+                            json!({"type":"review_triage.batch_failed","batch":index + 1,"invalid_lines":invalid_lines,"empty_explanations":empty_explanations})
+                        );
                         atomic_json(&state_dir.join("failed-batches.json"), &batch_failures)?;
                         eprintln!(
                             "Batch {} failed; retaining reviews for retry: {error:#}",
