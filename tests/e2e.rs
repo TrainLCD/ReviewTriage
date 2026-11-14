@@ -510,6 +510,13 @@ fn failed_batch_does_not_discard_successful_reviews_and_retry_only_processes_pen
         serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap()).unwrap();
     assert_eq!(report["failed_review_count"], 1);
     assert_eq!(report["review_count"], 2);
+    let progress: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/progress.json")).unwrap())
+            .unwrap();
+    assert_eq!(progress["phase"], "partial");
+    assert_eq!(progress["analyzed"], 1);
+    assert_eq!(progress["failed"], 1);
+    assert_eq!(progress["created"], 1);
     let processed: Value =
         serde_json::from_slice(&fs::read(h.dir.path().join("state/processed.json")).unwrap())
             .unwrap();

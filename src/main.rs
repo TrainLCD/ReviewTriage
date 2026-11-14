@@ -2,6 +2,7 @@ mod analysis;
 mod github;
 mod http;
 mod model;
+mod progress;
 mod security;
 mod stores;
 
@@ -131,6 +132,8 @@ fn main() -> Result<()> {
             lock.try_lock_exclusive()
                 .context("another run is using this state directory")?;
             let state_dir = state_dir.canonicalize()?;
+            let mut progress = progress::Progress::new(state_dir.join("progress.json"));
+            progress.save("fetching");
             let pending = state_dir.join("pending-issue.json");
             let receipts_path = state_dir.join("created-issues.json");
             let receipts = github::load_receipts(&receipts_path)?;
@@ -168,6 +171,9 @@ fn main() -> Result<()> {
                 .filter(|r| recheck || processed.get(&r.key()) != Some(&r.fingerprint()))
                 .collect();
             let report_path = state_dir.join("report.json");
+            progress.total = reviews.len();
+            progress.batches = reviews.len().div_ceil(usize::from(batch_size));
+            progress.save("preparing");
             if reviews.is_empty() {
                 atomic_json(
                     &report_path,
@@ -176,6 +182,7 @@ fn main() -> Result<()> {
                 eprintln!(
                     "No new or edited text reviews to analyze (use --recheck to reanalyze processed reviews)."
                 );
+                progress.save("complete");
                 return Ok(());
             }
             eprintln!(
@@ -195,6 +202,8 @@ fn main() -> Result<()> {
             let mut batch_failures = vec![];
             let mut first_failure = None;
             for (index, batch) in reviews.chunks(batch_size.into()).enumerate() {
+                progress.batch = index + 1;
+                progress.save("analyzing");
                 eprintln!("Analyzing batch {}…", index + 1);
                 let result = (|| -> Result<model::Analysis> {
                     let mut session =
@@ -211,6 +220,7 @@ fn main() -> Result<()> {
                     let mut inspected = std::collections::HashSet::new();
                     let mut discussion_passes = 0;
                     while !session.candidate_urls.is_subset(&inspected) {
+                        progress.save("discussions");
                         ensure!(
                             discussion_passes < 3,
                             "discussion candidates did not converge"
@@ -255,6 +265,8 @@ fn main() -> Result<()> {
                         if first_failure.is_none() {
                             first_failure = Some(error);
                         }
+                        progress.failed += batch.len();
+                        progress.save("analyzing");
                         continue;
                     }
                 };
@@ -275,6 +287,8 @@ fn main() -> Result<()> {
                         findings.push(f);
                     }
                 }
+                progress.analyzed += batch.len();
+                progress.save("analyzing");
             }
             if apply && !failed_keys.is_empty() {
                 // A failed recheck invalidates even a previously processed fingerprint.
@@ -289,6 +303,7 @@ fn main() -> Result<()> {
             if findings.is_empty()
                 && let Some(error) = first_failure
             {
+                progress.save("failed");
                 return Err(error);
             }
             let drafts:Vec<_>=findings.iter().filter(|f|f.status==Status::New).map(|f|Ok(json!({"repository":f.repository,"title":f.title,"body":analysis::issue_body(f,&reviews,&snapshots)?}))).collect::<Result<_>>()?;
@@ -296,6 +311,7 @@ fn main() -> Result<()> {
                 "snapshots":snapshots,"review_count":reviews.len(),"cached_review_count":total_reviews,"failed_review_count":failed_keys.len(),"batch_failures":batch_failures,"findings":findings,"drafts":drafts,"created_issues":[],"apply":apply});
             atomic_json(&report_path, &report)?;
             if apply {
+                progress.save("publishing");
                 let matched: std::collections::HashSet<_> = findings
                     .iter()
                     .flat_map(|f| f.related_urls.iter().cloned())
@@ -338,6 +354,8 @@ fn main() -> Result<()> {
                     created.push(url.clone());
                     report["created_issues"] = json!(created);
                     atomic_json(&report_path, &report)?;
+                    progress.created = created.len();
+                    progress.save("publishing");
                     created_urls.insert(url);
                     expected.push(issue);
                 }
@@ -355,6 +373,7 @@ fn main() -> Result<()> {
                         processed.insert(key, review.fingerprint());
                     }
                 }
+                progress.save("saving");
                 atomic_json(&processed_path, &processed)?;
             }
             eprintln!(
@@ -368,6 +387,11 @@ fn main() -> Result<()> {
                     " (dry-run; use --apply to create issues)"
                 }
             );
+            progress.save(if batch_failures.is_empty() {
+                "complete"
+            } else {
+                "partial"
+            });
             ensure!(
                 batch_failures.is_empty(),
                 "some batches failed; validated reviews saved, failed reviews remain pending"
