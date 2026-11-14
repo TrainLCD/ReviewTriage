@@ -1,0 +1,136 @@
+name: Complete PR20 verification
+
+on:
+  push:
+    branches: [verify/complete-pr20]
+    paths: [.github/workflows/complete-pr20.yml]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: review-triage
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  triage:
+    if: github.ref == 'refs/heads/verify/complete-pr20'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Restore previous state
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_RUN_ATTEMPT" != 1 ]]; then
+            echo "::error::Use Run workflow for a new run; reruns cannot safely restore their own previous attempt."
+            exit 1
+          fi
+          mkdir -p state
+          gh run download 43620500554 --repo "$GITHUB_REPOSITORY" --name review-triage-state --dir state
+          touch state/checkpoint
+          rm -f state/report.json
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install sandbox and search tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep bubblewrap
+      - name: Install tools and build
+        run: |
+          npm install --global @openai/codex@0.169.0
+          codex --version
+          real_codex=$(command -v codex)
+          mkdir -p "$RUNNER_TEMP/capped-bin"
+          export REAL_CODEX="$real_codex"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          wrapper = '''#!/usr/bin/env python3
+          import json, os, pathlib, sys
+          real = REAL_PATH
+          args = sys.argv[1:]
+          while args and args[0] in ("-c", "--config"):
+              args = args[2:]
+          if args[:1] == ["exec"]:
+              path = pathlib.Path(COUNT_PATH)
+              count = int(path.read_text()) if path.exists() else 0
+              if count >= 52:
+                  print(json.dumps({"type":"turn.failed","error":{"message":"Verification Codex session limit reached (52); session not started"}}))
+                  sys.exit(78)
+              path.write_text(str(count + 1))
+          os.execv(real, [real, *sys.argv[1:]])
+          '''
+          wrapper = wrapper.replace("REAL_PATH", repr(os.environ["REAL_CODEX"])).replace("COUNT_PATH", repr(str(Path.cwd() / "state" / "model-call-count.txt")))
+          dest = Path(os.environ["RUNNER_TEMP"]) / "capped-bin" / "codex"
+          dest.write_text(wrapper)
+          dest.chmod(0o755)
+          PY
+          echo "$RUNNER_TEMP/capped-bin" >> "$GITHUB_PATH"
+          command -v gh
+          command -v rg
+          cargo build --release --locked
+      - name: Verify read-only sandbox
+        run: |
+          timeout 30s codex sandbox -c 'sandbox_mode="read-only"' -c shell_environment_policy.inherit=none -c "shell_environment_policy.set.PATH=\"$PATH\"" -- /bin/cat Cargo.toml > /dev/null
+      - name: Run review triage
+        env:
+          GH_TOKEN: ${{ secrets.REVIEW_TRIAGE_GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          APPLY: 'true'
+          RECHECK: 'false'
+          TERRITORY: JPN
+        run: |
+          set -euo pipefail
+          for name in GH_TOKEN OPENAI_API_KEY ASC_ISSUER_ID ASC_KEY_ID ASC_PRIVATE_KEY GOOGLE_SERVICE_ACCOUNT_JSON; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing required secret: $name"
+              exit 1
+            fi
+          done
+          [[ "$TERRITORY" =~ ^[A-Z]{3}$ ]] || { echo "::error::Use a three-letter territory such as JPN"; exit 1; }
+          umask 077
+          credentials=$(mktemp -d "$RUNNER_TEMP/review-triage.XXXXXX")
+          trap 'rm -rf "$credentials"' EXIT
+          printf '%s' "$ASC_PRIVATE_KEY" > "$credentials/apple.p8"
+          printf '%s' "$GOOGLE_SERVICE_ACCOUNT_JSON" > "$credentials/google.json"
+          export ASC_PRIVATE_KEY_PATH="$credentials/apple.p8"
+          export GOOGLE_APPLICATION_CREDENTIALS="$credentials/google.json"
+          unset ASC_PRIVATE_KEY GOOGLE_SERVICE_ACCOUNT_JSON
+          args=(run --state-dir state --territory "$TERRITORY")
+          [[ "$APPLY" != true ]] || args+=(--apply)
+          [[ "$RECHECK" != true ]] || args+=(--recheck)
+          # Keep raw model output private; show numeric progress and a 30-second heartbeat.
+          python3 scripts/run_triage.py "$RUNNER_TEMP/review-triage.log" state/progress.json \
+            target/release/trainlcd-review-triage "${args[@]}" || {
+            python3 scripts/report_triage_error.py "$RUNNER_TEMP/review-triage.log"
+            exit 1
+          }
+      - name: Save state and report
+        if: always() && steps.state.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-triage-state
+          path: state/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Summary
+        if: always()
+        run: |
+          echo '### Review triage' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Download review-triage-state from this run for report.json and recovery state. Check the job result before using the report.' >> "$GITHUB_STEP_SUMMARY"
