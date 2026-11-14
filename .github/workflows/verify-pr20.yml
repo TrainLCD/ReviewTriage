@@ -1,0 +1,99 @@
+name: PR20 live evidence repair verification
+on:
+  push:
+    branches: [verify/evidence-pr20]
+    paths: [.github/workflows/verify-pr20.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: sudo apt-get update && sudo apt-get install --yes ripgrep bubblewrap
+      - run: npm install --global @openai/codex
+      - run: cargo build --release --locked
+      - name: Load real reviews from the failed run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 43600313661 --repo TrainLCD/ReviewTriage --name review-triage-state --dir previous
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          rows = json.loads(Path('previous/reviews.json').read_text())
+          rows = sorted(rows, key=lambda row: row['updated_at'], reverse=True)[:3]
+          Path('input.json').write_text(json.dumps(rows, ensure_ascii=False))
+          print(f'Replaying {len(rows)} real reviews.')
+          PY
+      - name: Prepare one-time evidence fault and publication guard
+        run: |
+          python3 - <<'PY'
+          import shutil, os
+          from pathlib import Path
+          directory=Path('verify-bin'); directory.mkdir()
+          codex=shutil.which('codex')
+          gh=shutil.which('gh')
+          script='''#!/usr/bin/env python3
+          import sys, os, subprocess, json
+          from pathlib import Path
+          result=subprocess.run([REAL_CODEX]+sys.argv[1:])
+          if result.returncode: sys.exit(result.returncode)
+          marker=Path(os.environ['VERIFICATION_COUNTER'])
+          count=int(marker.read_text()) if marker.exists() else 0
+          if count==0:
+              path=Path(sys.argv[sys.argv.index('--output-last-message')+1])
+              data=json.loads(path.read_text())
+              evidence=next(e for f in data['findings'] for e in f['evidence'])
+              evidence['line']=999999
+              evidence['explanation']=' '
+              path.write_text(json.dumps(data, ensure_ascii=False))
+          marker.write_text(str(count+1))
+          '''
+          script=script.replace('REAL_CODEX',repr(codex))
+          (directory/'codex').write_text(script)
+          (directory/'gh').write_text('#!/bin/bash\nfor arg in "$@"; do\n case "$arg" in POST|PATCH|PUT|DELETE|--method=*) exit 97;; esac\ndone\nexec '+repr(gh)+' "$@"\n')
+          for p in directory.iterdir(): p.chmod(0o755)
+          PY
+      - name: Repair injected evidence using real Codex and finish apply
+        env:
+          GH_TOKEN: ${{ secrets.REVIEW_TRIAGE_GITHUB_TOKEN }}
+          CODEX_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          export VERIFICATION_COUNTER="$RUNNER_TEMP/codex-calls"
+          PATH="$PWD/verify-bin:$PATH" target/release/trainlcd-review-triage run --input input.json --state-dir verification-state --apply > "$RUNNER_TEMP/triage.log" 2>&1 || {
+            python3 scripts/report_triage_error.py "$RUNNER_TEMP/triage.log"
+            exit 1
+          }
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          r=json.loads(Path('verification-state/report.json').read_text())
+          p=json.loads(Path('verification-state/processed.json').read_text())
+          calls=int(Path(os.environ['VERIFICATION_COUNTER']).read_text())
+          assert calls>=2, 'Repair was not exercised'
+          assert r['apply'] is True and not r['created_issues']
+          uncertain={k for f in r['findings'] if f['status']=='uncertain' for k in f['review_keys']}
+          keys={row['store']+':'+row['id'] for row in json.loads(Path('input.json').read_text())}
+          assert set(p)==keys-uncertain and len(p)>0
+          evidence=[e for f in r['findings'] for e in f['evidence']]
+          assert evidence and all(e['line']!=999999 and e['explanation'].strip() for e in evidence)
+          log=Path(os.environ['RUNNER_TEMP']+'/triage.log').read_text()
+          assert '"review_triage.invalid_evidence"' in log
+          print(json.dumps({'codex_calls':calls,'reviews':r['review_count'],'processed':len(p),'pending':len(uncertain),'evidence_count':len(evidence),'created_issues':len(r['created_issues']),'repair_verified':True}))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr20-verification-report
+          path: verification-state/report.json
+          if-no-files-found: ignore
+          retention-days: 7
