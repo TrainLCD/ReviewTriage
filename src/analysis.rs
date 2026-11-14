@@ -34,6 +34,9 @@ impl std::fmt::Display for InvalidEvidence {
 impl std::error::Error for InvalidEvidence {}
 
 fn repair_instruction(error: &anyhow::Error) -> Option<String> {
+    if error.to_string() == "new issue has existing match" {
+        return Some("Your previous response classified a finding as new while citing an existing issue/PR. Reinspect those matches: use existing when they cover the concern, or uncertain when their scope is unresolved. Preserve candidate URLs so their discussions can be fetched. Do not simply delete URLs to make a new finding pass validation. Return the complete corrected findings array, preserving every review and distinct concern.\n".to_owned());
+    }
     if let Some(invalid) = error.downcast_ref::<InvalidEvidence>() {
         return Some(format!(
             "Your previous response has invalid code evidence. Problems (zero-based finding/evidence indexes): {}. Reopen the cited files in the current snapshots with line numbers (for example nl -ba). Correct ALL invalid lines and empty explanations, checking every evidence entry. Never clamp a line number or invent an explanation. If evidence cannot be established, use uncertain and remove the unsupported evidence. Preserve every review and distinct concern, and return the complete corrected findings array.\n",
@@ -88,6 +91,7 @@ Do not assume absent comments are empty discussions. When a potential match exis
 For relevant PRs inspect available git history and source. A closed issue or developer reply alone is NOT proof of a fix.
 Classify EACH distinct concern; a review can contain multiple concerns. Group equivalent concerns across reviews.
 new: actionable, demonstrably not handled by current source AND no existing issue/PR covers it.
+new must have no related_urls. If a potential issue/PR match needs discussion verification, use uncertain with its URL, never new. Do not drop candidate matches merely to permit new issue creation.
 existing: matching issue/PR already covers it (including rejected requests); cite the exact existing URL.
 resolved: concrete code proves it is implemented/fixed. Distinguish default-branch implementation from store release; never invent release status.
 Compare review date/version to fixes; a newer complaint may be a regression. Do not dismiss it solely because an older fix exists.

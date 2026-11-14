@@ -107,6 +107,13 @@ elif name=='codex':
   else: findings[0][field]='ghp_not_a_real_secret'
  if mode=='uncertain': findings[0]['status']='uncertain'
  if mode=='omitted': findings=[]
+ if mode=='partial-failure' and any(e['review']['id']=='r1' for e in reviews): findings=[]
+ if mode in ['new-match-once','new-match-always']:
+  if mode=='new-match-always' or int(calls.read_text())==1:
+   assert known
+   findings[0]['status']='new'
+  else:
+   assert 'Do not simply delete URLs' in prompt or (workspace/'matched-discussions.json').exists()
  if mode in ['bad-line-once', 'bad-line-always', 'empty-explanation-once', 'multiple-evidence-once']:
   if mode=='bad-line-always' or int(calls.read_text())==1:
    evidence=findings[0]['evidence'][0]
@@ -175,6 +182,9 @@ elif name=='codex':
             .env("MOCK_MODE", mode);
         if recheck {
             c.arg("--recheck");
+        }
+        if mode == "partial-failure" {
+            c.args(["--batch-size", "1"]);
         }
         if apply {
             c.arg("--apply");
@@ -468,4 +478,82 @@ fn invalid_evidence_is_repaired_before_apply_and_persistent_errors_never_publish
     assert!(!h.dir.path().join("issues.json").exists());
     assert!(!h.dir.path().join("state/processed.json").exists());
     assert!(!h.dir.path().join("state/report.json").exists());
+}
+
+#[test]
+fn failed_batch_does_not_discard_successful_reviews_and_retry_only_processes_pending() {
+    let h = Harness::new();
+    let mut reviews: Vec<Value> =
+        serde_json::from_slice(&fs::read(h.dir.path().join("input.json")).unwrap()).unwrap();
+    let mut second = reviews[0].clone();
+    second["id"] = json!("r2");
+    reviews.push(second);
+    fs::write(
+        h.dir.path().join("input.json"),
+        serde_json::to_vec(&reviews).unwrap(),
+    )
+    .unwrap();
+    let output = h.run(true, "partial-failure");
+    assert!(!output.status.success());
+    assert_eq!(h.count(), 1);
+    let report: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap()).unwrap();
+    assert_eq!(report["failed_review_count"], 1);
+    assert_eq!(report["review_count"], 2);
+    let processed: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/processed.json")).unwrap())
+            .unwrap();
+    assert!(processed.get("google:r1").is_none());
+    assert!(processed.get("google:r2").is_some());
+    let retry = h.run(true, "normal");
+    assert!(
+        retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert_eq!(h.count(), 1);
+    let report: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap()).unwrap();
+    assert_eq!(report["review_count"], 1);
+    assert_eq!(report["failed_review_count"], 0);
+}
+
+#[test]
+fn new_with_existing_match_is_reassessed_without_duplicate_publication() {
+    for persistent in [false, true] {
+        let h = Harness::new();
+        assert!(h.run(true, "normal").status.success());
+        fs::remove_file(h.dir.path().join("codex-calls")).unwrap();
+        let output = h.run(
+            true,
+            if persistent {
+                "recheck-new-match-always"
+            } else {
+                "recheck-new-match-once"
+            },
+        );
+        assert_eq!(
+            output.status.success(),
+            !persistent,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(h.count(), 1);
+        let processed: Value =
+            serde_json::from_slice(&fs::read(h.dir.path().join("state/processed.json")).unwrap())
+                .unwrap();
+        assert_eq!(processed.get("google:r1").is_some(), !persistent);
+        if !persistent {
+            let report: Value =
+                serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                    .unwrap();
+            assert_eq!(report["findings"][0]["status"], "existing");
+            assert!(
+                !report["findings"][0]["related_urls"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
 }

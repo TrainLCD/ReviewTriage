@@ -14,6 +14,7 @@ STAGES = {
     "install and log in to Codex CLI": "Codex CLI起動",
 }
 CAUSES = {
+    "some batches failed; validated reviews saved, failed reviews remain pending": "一部バッチの解析失敗（検証済み分は保存済み、失敗分は次回再処理）",
     "analysis sandbox failed; no issues published": "解析用サンドボックスの起動失敗",
     "analysis commands never succeeded; no issues published": "解析用コマンドが一度も成功していない",
     "invalid destination": "解析結果の起票先が不正",

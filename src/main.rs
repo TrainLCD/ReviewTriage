@@ -46,7 +46,7 @@ enum Action {
         /// Reanalyze unchanged reviews already handled by a successful --apply run.
         #[arg(long)]
         recheck: bool,
-        /// Create only evidence-backed new issues after all batches validate.
+        /// Create evidence-backed issues from validated batches; retain failed batches for retry.
         #[arg(long)]
         apply: bool,
         #[arg(long,default_value_t=10,value_parser=clap::value_parser!(u16).range(1..=50))]
@@ -191,27 +191,13 @@ fn main() -> Result<()> {
             atomic_json(&workspace.path().join("github-context.json"), &issues)?;
             atomic_json(&workspace.path().join("snapshots.json"), &snapshots)?;
             let mut findings: Vec<Finding> = vec![];
+            let mut failed_keys = std::collections::HashSet::new();
+            let mut batch_failures = vec![];
+            let mut first_failure = None;
             for (index, batch) in reviews.chunks(batch_size.into()).enumerate() {
                 eprintln!("Analyzing batch {}…", index + 1);
-                let mut result = analysis::analyze(
-                    workspace.path(),
-                    batch,
-                    &issues,
-                    &findings,
-                    model.as_deref(),
-                    timeout_seconds,
-                )?;
-                // Fetch full discussions/PR metadata only for actual matches, not thousands
-                // of unrelated historical PR threads.
-                let refs: std::collections::HashSet<_> = result
-                    .findings
-                    .iter()
-                    .flat_map(|f| f.related_urls.iter().cloned())
-                    .collect();
-                if !refs.is_empty() {
-                    let details = github::reference_details(&issues, &refs)?;
-                    atomic_json(&workspace.path().join("matched-discussions.json"), &details)?;
-                    result = analysis::analyze(
+                let result = (|| -> Result<model::Analysis> {
+                    let mut result = analysis::analyze(
                         workspace.path(),
                         batch,
                         &issues,
@@ -219,8 +205,51 @@ fn main() -> Result<()> {
                         model.as_deref(),
                         timeout_seconds,
                     )?;
-                    fs::remove_file(workspace.path().join("matched-discussions.json"))?;
+                    // Fetch full discussions/PR metadata only for actual matches, not thousands
+                    // of unrelated historical PR threads.
+                    let refs: std::collections::HashSet<_> = result
+                        .findings
+                        .iter()
+                        .flat_map(|f| f.related_urls.iter().cloned())
+                        .collect();
+                    if !refs.is_empty() {
+                        let details = github::reference_details(&issues, &refs)?;
+                        atomic_json(&workspace.path().join("matched-discussions.json"), &details)?;
+                        result = analysis::analyze(
+                            workspace.path(),
+                            batch,
+                            &issues,
+                            &findings,
+                            model.as_deref(),
+                            timeout_seconds,
+                        )?;
+                        fs::remove_file(workspace.path().join("matched-discussions.json"))?;
+                    }
+                    Ok(result)
+                })();
+                // Never let a rejected result enter the prior findings or publication set.
+                // Clear discussion context even when the second analysis failed.
+                let discussions = workspace.path().join("matched-discussions.json");
+                if discussions.exists() {
+                    fs::remove_file(discussions)?;
                 }
+                let result = match result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let keys: Vec<_> = batch.iter().map(Review::key).collect();
+                        failed_keys.extend(keys.iter().cloned());
+                        batch_failures.push(json!({"batch":index + 1,"review_keys":keys}));
+                        atomic_json(&state_dir.join("failed-batches.json"), &batch_failures)?;
+                        eprintln!(
+                            "Batch {} failed; retaining reviews for retry: {error:#}",
+                            index + 1
+                        );
+                        if first_failure.is_none() {
+                            first_failure = Some(error);
+                        }
+                        continue;
+                    }
+                };
                 for f in result.findings {
                     if f.status == Status::Existing && f.related_urls.is_empty() {
                         let previous = findings
@@ -239,9 +268,24 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            if apply && !failed_keys.is_empty() {
+                // A failed recheck invalidates even a previously processed fingerprint.
+                for key in &failed_keys {
+                    processed.remove(key);
+                }
+                if processed_path.exists() || !processed.is_empty() {
+                    atomic_json(&processed_path, &processed)?;
+                }
+            }
+            atomic_json(&state_dir.join("failed-batches.json"), &batch_failures)?;
+            if findings.is_empty()
+                && let Some(error) = first_failure
+            {
+                return Err(error);
+            }
             let drafts:Vec<_>=findings.iter().filter(|f|f.status==Status::New).map(|f|Ok(json!({"repository":f.repository,"title":f.title,"body":analysis::issue_body(f,&reviews,&snapshots)?}))).collect::<Result<_>>()?;
             let mut report = json!({"created_at":chrono::Utc::now(),"coverage":"Apple selected territory; Google last 7 days plus supplied CSV/cache. Google API does not expose country.",
-                "snapshots":snapshots,"review_count":reviews.len(),"cached_review_count":total_reviews,"findings":findings,"drafts":drafts,"created_issues":[],"apply":apply});
+                "snapshots":snapshots,"review_count":reviews.len(),"cached_review_count":total_reviews,"failed_review_count":failed_keys.len(),"batch_failures":batch_failures,"findings":findings,"drafts":drafts,"created_issues":[],"apply":apply});
             atomic_json(&report_path, &report)?;
             if apply {
                 let matched: std::collections::HashSet<_> = findings
@@ -289,13 +333,14 @@ fn main() -> Result<()> {
                     created_urls.insert(url);
                     expected.push(issue);
                 }
-                // Commit processing state only after a fully successful apply. Pending or
-                // partially published runs are safely retried using stable issue markers.
+                // Commit only validated reviews after their publication succeeds.
+                // Failed/uncertain reviews remain eligible; successful batches are not repeated.
                 for review in &reviews {
                     let key = review.key();
-                    if findings
-                        .iter()
-                        .any(|f| f.status == Status::Uncertain && f.review_keys.contains(&key))
+                    if failed_keys.contains(&key)
+                        || findings
+                            .iter()
+                            .any(|f| f.status == Status::Uncertain && f.review_keys.contains(&key))
                     {
                         processed.remove(&key);
                     } else {
@@ -314,6 +359,10 @@ fn main() -> Result<()> {
                 } else {
                     " (dry-run; use --apply to create issues)"
                 }
+            );
+            ensure!(
+                batch_failures.is_empty(),
+                "some batches failed; validated reviews saved, failed reviews remain pending"
             );
         }
     }
