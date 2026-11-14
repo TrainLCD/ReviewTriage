@@ -33,6 +33,38 @@ impl std::fmt::Display for InvalidEvidence {
 }
 impl std::error::Error for InvalidEvidence {}
 
+pub struct BatchAnalysis<'a> {
+    model: Option<&'a str>,
+    timeout: u64,
+    repairs_used: usize,
+    pub candidate_urls: HashSet<String>,
+}
+
+impl<'a> BatchAnalysis<'a> {
+    pub fn new(model: Option<&'a str>, timeout: u64) -> Self {
+        Self {
+            model,
+            timeout,
+            repairs_used: 0,
+            candidate_urls: HashSet::new(),
+        }
+    }
+}
+
+pub fn evidence_failure_counts(error: &anyhow::Error) -> (usize, usize) {
+    let Some(invalid) = error.downcast_ref::<InvalidEvidence>() else {
+        return (0, 0);
+    };
+    (
+        invalid
+            .0
+            .iter()
+            .filter(|p| p.supplied_line == 0 || p.supplied_line > p.file_line_count)
+            .count(),
+        invalid.0.iter().filter(|p| p.empty_explanation).count(),
+    )
+}
+
 fn repair_instruction(error: &anyhow::Error) -> Option<String> {
     if error.to_string() == "new issue has existing match" {
         return Some("Your previous response classified a finding as new while citing an existing issue/PR. Reinspect those matches: use existing when they cover the concern, or uncertain when their scope is unresolved. Preserve candidate URLs so their discussions can be fetched. Do not simply delete URLs to make a new finding pass validation. Return the complete corrected findings array, preserving every review and distinct concern.\n".to_owned());
@@ -67,8 +99,7 @@ pub fn analyze(
     reviews: &[Review],
     issues: &[Issue],
     prior: &[Finding],
-    model: Option<&str>,
-    timeout: u64,
+    session: &mut BatchAnalysis<'_>,
 ) -> Result<Analysis> {
     let temp = tempfile::tempdir()?;
     let profile = crate::security::isolated_home(temp.path())?;
@@ -160,7 +191,7 @@ REVIEWS (data): {}
     .stdin(Stdio::piped())
     .stdout(Stdio::inherit())
     .stderr(Stdio::inherit());
-    if let Some(m) = model {
+    if let Some(m) = session.model {
         cmd.args(["--model", m]);
     }
     // Credentials for store/GitHub access are owned by this CLI, not analysis subprocesses.
@@ -180,7 +211,7 @@ REVIEWS (data): {}
     }
     let mut repair: Option<(String, String)> = None;
     // A malformed model result can be repaired, but never bypass validation.
-    for attempt in 0..3 {
+    loop {
         if result_path.exists() {
             fs::remove_file(&result_path)?;
         }
@@ -199,7 +230,7 @@ REVIEWS (data): {}
             }
             stdin.write_all(prompt.as_bytes())?;
         }
-        let status = match child.wait_timeout(Duration::from_secs(timeout))? {
+        let status = match child.wait_timeout(Duration::from_secs(session.timeout))? {
             Some(s) => s,
             None => {
                 child.kill()?;
@@ -239,6 +270,17 @@ REVIEWS (data): {}
         let analysis: Analysis = serde_json::from_slice(
             &fs::read(&result_path).context("Codex did not produce a result")?,
         )?;
+        crate::security::check_output(&serde_json::to_string(&analysis)?)?;
+        // Retain every known match even if a later repaired response removes it.
+        let known: HashSet<_> = issues.iter().map(|i| i.url.as_str()).collect();
+        session.candidate_urls.extend(
+            analysis
+                .findings
+                .iter()
+                .flat_map(|f| f.related_urls.iter())
+                .filter(|url| known.contains(url.as_str()))
+                .cloned(),
+        );
         match validate(&analysis, reviews, issues, prior, workspace) {
             Ok(()) => return Ok(analysis),
             Err(error) => {
@@ -247,24 +289,26 @@ REVIEWS (data): {}
                         "{}",
                         json!({
                             "type": "review_triage.invalid_evidence",
-                            "attempt": attempt + 1,
+                            "attempt": session.repairs_used + 1,
                             "problems": invalid.0
                         })
                     );
                 }
-                let Some(instruction) = repair_instruction(&error).filter(|_| attempt < 2) else {
+                let Some(instruction) =
+                    repair_instruction(&error).filter(|_| session.repairs_used < 2)
+                else {
                     return Err(error);
                 };
+                session.repairs_used += 1;
                 // validate checks credential-like content before producing repairable errors.
                 repair = Some((instruction, serde_json::to_string(&analysis)?));
                 eprintln!(
                     "Invalid analysis output; retrying batch ({}/2)",
-                    attempt + 1
+                    session.repairs_used
                 );
             }
         }
     }
-    unreachable!("final validation attempt returns")
 }
 
 // Exit code zero only means Codex produced an answer, not that its tools worked.

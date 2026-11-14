@@ -114,6 +114,16 @@ elif name=='codex':
    findings[0]['status']='new'
   else:
    assert 'Do not simply delete URLs' in prompt or (workspace/'matched-discussions.json').exists()
+ if mode=='dropped-match':
+  assert known
+  if (workspace/'matched-discussions.json').exists():
+   findings[0]['status']='existing'
+  else:
+   findings[0]['status']='new'
+   if int(calls.read_text())>1: findings[0]['related_urls']=[]
+ if mode=='shared-budget':
+  if int(calls.read_text()) in [1,2] or (workspace/'matched-discussions.json').exists():
+   findings[0]['evidence'][0]['line']=999
  if mode in ['bad-line-once', 'bad-line-always', 'empty-explanation-once', 'multiple-evidence-once']:
   if mode=='bad-line-always' or int(calls.read_text())==1:
    evidence=findings[0]['evidence'][0]
@@ -554,6 +564,31 @@ fn new_with_existing_match_is_reassessed_without_duplicate_publication() {
                     .unwrap()
                     .is_empty()
             );
+        }
+    }
+}
+
+#[test]
+fn removed_candidate_is_still_inspected_and_repair_budget_is_shared() {
+    for mode in ["dropped-match", "shared-budget"] {
+        let h = Harness::new();
+        assert!(h.run(true, "normal").status.success());
+        fs::remove_file(h.dir.path().join("codex-calls")).unwrap();
+        let output = h.run(true, &format!("recheck-{mode}"));
+        assert_eq!(
+            output.status.success(),
+            mode == "dropped-match",
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(h.count(), 1);
+        let calls = fs::read_to_string(h.dir.path().join("codex-calls")).unwrap();
+        assert_eq!(calls, if mode == "dropped-match" { "3" } else { "4" });
+        if mode == "dropped-match" {
+            let report: Value =
+                serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                    .unwrap();
+            assert_eq!(report["findings"][0]["status"], "existing");
         }
     }
 }

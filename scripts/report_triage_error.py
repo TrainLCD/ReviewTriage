@@ -181,6 +181,20 @@ def summarize(log, sensitive=()):
         evidence = evidence_diagnostics(log)
         if evidence:
             detail += " / " + evidence
+    if any(line.strip() == "some batches failed; validated reviews saved, failed reviews remain pending" for line in lines):
+        invalid_lines = empty_explanations = 0
+        for line in log.splitlines():
+            try:
+                event = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(event, dict) or event.get("type") != "review_triage.batch_failed":
+                continue
+            a, b = event.get("invalid_lines"), event.get("empty_explanations")
+            if type(a) is int and type(b) is int and 0 <= a <= 1000000 and 0 <= b <= 1000000:
+                invalid_lines += a
+                empty_explanations += b
+        detail += f" / 行番号範囲外={invalid_lines}件 / 説明空欄={empty_explanations}件"
     if stage.startswith("Codex"):
         diagnostic = codex_diagnostics(log, sensitive)
         if diagnostic:
