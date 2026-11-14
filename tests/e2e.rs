@@ -71,9 +71,13 @@ elif name=='codex':
   sys.exit(42)
  if mode=='timeout':
   import time;time.sleep(30)
+ if mode=='success-then-sandbox':
+  print(json.dumps({'type':'item.completed','item':{'type':'command_execution','status':'completed','exit_code':0,'aggregated_output':''}}))
  if mode!='no-commands':
-  failed=mode=='sandbox-failure'
+  failed=mode in ['sandbox-failure','success-then-sandbox','sandbox-then-success']
   print(json.dumps({'type':'item.completed','item':{'type':'command_execution','status':'failed' if failed else 'completed','exit_code':1 if failed else 0,'aggregated_output':'bwrap: creating namespace failed' if failed else ''}}))
+ if mode=='sandbox-then-success':
+  print(json.dumps({'type':'item.completed','item':{'type':'command_execution','status':'completed','exit_code':0,'aggregated_output':''}}))
  findings=[]
  destination='TrainLCD/'+mode[6:] if mode.startswith('route-') else 'TrainLCD/StationAPI'
  if mode.startswith('route-'):
@@ -397,7 +401,12 @@ fn persistent_duplicate_topics_stop_without_publishing() {
 
 #[test]
 fn sandbox_failure_or_missing_execution_cannot_publish_or_mark_processed() {
-    for mode in ["sandbox-failure", "no-commands"] {
+    for mode in [
+        "sandbox-failure",
+        "no-commands",
+        "success-then-sandbox",
+        "sandbox-then-success",
+    ] {
         let h = Harness::new();
         let output = h.run(true, mode);
         assert!(!output.status.success());
