@@ -34,7 +34,7 @@ jobs:
             exit 1
           fi
           mkdir -p state
-          gh run download 43600313661 --repo "$GITHUB_REPOSITORY" --name review-triage-state --dir state
+          gh run download 43602498550 --repo "$GITHUB_REPOSITORY" --name review-triage-state --dir state
           touch state/checkpoint
           rm -f state/report.json
           echo "ready=true" >> "$GITHUB_OUTPUT"
