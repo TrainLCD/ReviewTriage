@@ -36,7 +36,7 @@ impl std::error::Error for InvalidEvidence {}
 pub struct BatchAnalysis<'a> {
     model: Option<&'a str>,
     timeout: u64,
-    repairs_used: usize,
+    pub repairs_used: usize,
     pub candidate_urls: HashSet<String>,
 }
 

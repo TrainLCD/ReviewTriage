@@ -227,39 +227,85 @@ fn main() -> Result<()> {
                     );
                     let mut session =
                         analysis::BatchAnalysis::new(model.as_deref(), timeout_seconds);
-                    let mut result = analysis::analyze(
-                        workspace.path(),
-                        batch,
-                        &issues,
-                        &findings,
-                        &mut session,
-                    )?;
-                    // Fetch full discussions/PR metadata only for actual matches, not thousands
-                    // of unrelated historical PR threads.
-                    let mut inspected = std::collections::HashSet::new();
-                    let mut discussion_passes = 0;
-                    let mut discussions = json!([]);
-                    while !session.candidate_urls.is_subset(&inspected) {
-                        progress.save("discussions");
-                        ensure!(
-                            discussion_passes < 3,
-                            "discussion candidates did not converge"
+                    let in_flight_path = state_dir
+                        .join("analysis-in-flight")
+                        .join(format!("{key}.json"));
+                    let saved = if recheck {
+                        None
+                    } else {
+                        checkpoint::load_in_flight(
+                            &in_flight_path,
+                            batch,
+                            &issues,
+                            &findings,
+                            workspace.path(),
+                        )?
+                    };
+                    let mut stage = if let Some(saved) = saved {
+                        eprintln!(
+                            "Resuming batch {} from its last successful analysis",
+                            index + 1
                         );
-                        discussion_passes += 1;
-                        let details = github::reference_details(&issues, &session.candidate_urls)?;
-                        inspected = session.candidate_urls.clone();
-                        atomic_json(&workspace.path().join("matched-discussions.json"), &details)?;
-                        discussions = serde_json::to_value(&details)?;
-                        result = analysis::analyze(
+                        session.candidate_urls = saved.candidates.clone();
+                        session.repairs_used = saved.repairs_used;
+                        saved
+                    } else {
+                        let result = analysis::analyze(
                             workspace.path(),
                             batch,
                             &issues,
                             &findings,
                             &mut session,
                         )?;
+                        checkpoint::InFlight {
+                            analysis: result,
+                            candidates: session.candidate_urls.clone(),
+                            inspected: Default::default(),
+                            discussions: json!([]),
+                            passes: 0,
+                            repairs_used: session.repairs_used,
+                        }
+                    };
+                    atomic_json(&in_flight_path, &stage)?;
+                    while !session.candidate_urls.is_subset(&stage.inspected) {
+                        progress.save("discussions");
+                        ensure!(stage.passes < 3, "discussion candidates did not converge");
+                        let details = github::reference_details(&issues, &session.candidate_urls)?;
+                        let inspected = session.candidate_urls.clone();
+                        atomic_json(&workspace.path().join("matched-discussions.json"), &details)?;
+                        let result = analysis::analyze(
+                            workspace.path(),
+                            batch,
+                            &issues,
+                            &findings,
+                            &mut session,
+                        );
+                        // Even a failed call may have discovered candidates or spent repairs.
+                        // Keep the last validated result; do not mark this discussion pass done.
+                        stage.candidates = session.candidate_urls.clone();
+                        stage.repairs_used = session.repairs_used;
+                        match result {
+                            Ok(result) => {
+                                stage.analysis = result;
+                                stage.inspected = inspected;
+                                stage.discussions = serde_json::to_value(&details)?;
+                                stage.passes += 1;
+                            }
+                            Err(error) => {
+                                atomic_json(&in_flight_path, &stage)?;
+                                return Err(error);
+                            }
+                        }
+                        atomic_json(&in_flight_path, &stage)?;
                     }
-                    checkpoint::save(&path, &result, &session.candidate_urls, &discussions)?;
-                    Ok(result)
+                    checkpoint::save(
+                        &path,
+                        &stage.analysis,
+                        &stage.candidates,
+                        &stage.discussions,
+                    )?;
+                    fs::remove_file(&in_flight_path)?;
+                    Ok(stage.analysis)
                 })();
                 // Never let a rejected result enter the prior findings or publication set.
                 // Clear discussion context even when the second analysis failed.

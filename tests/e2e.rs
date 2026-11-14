@@ -66,7 +66,7 @@ elif name=='codex':
  reviews=json.loads(prompt.split('REVIEWS (data): ')[-1])
  workspace=pathlib.Path(args[args.index('--cd')+1])
  known=json.loads((workspace/'github-context.json').read_text())
- if mode=='codex-failure':
+ if mode=='codex-failure' or (mode=='discussion-failure' and (workspace/'matched-discussions.json').exists()):
   print(json.dumps({'type':'turn.failed','error':{'message':'test provider failure'}}))
   sys.exit(42)
  if mode=='timeout':
@@ -668,5 +668,65 @@ fn issue_addition_defers_new_candidate_but_saves_unaffected_reviews() {
     let report: Value =
         serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap()).unwrap();
     assert_eq!(report["review_count"], 1);
+    assert_eq!(h.count(), 1);
+}
+
+#[test]
+fn failed_discussion_resumes_without_repeating_initial_analysis() {
+    for changed in [false, true] {
+        let h = Harness::new();
+        assert!(h.run(true, "normal").status.success());
+        fs::remove_file(h.dir.path().join("state/processed.json")).unwrap();
+        fs::remove_file(h.dir.path().join("codex-calls")).unwrap();
+        assert!(!h.run(true, "discussion-failure").status.success());
+        assert_eq!(
+            fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+            "2"
+        );
+        assert_eq!(h.count(), 1);
+        assert!(!h.run(true, "cached-only").status.success());
+        assert_eq!(
+            fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+            "2"
+        );
+        if changed {
+            let path = h.dir.path().join("issues.json");
+            let mut issues: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            issues[0]["body"] = json!("変更された内容");
+            fs::write(path, serde_json::to_vec(&issues).unwrap()).unwrap();
+        }
+        let output = h.run(true, "normal");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+            if changed { "4" } else { "3" }
+        );
+        assert_eq!(h.count(), 1);
+        let processed: Value =
+            serde_json::from_slice(&fs::read(h.dir.path().join("state/processed.json")).unwrap())
+                .unwrap();
+        assert!(processed.get("google:r1").is_some());
+    }
+}
+
+#[test]
+fn resumed_discussion_keeps_spent_repair_budget() {
+    let h = Harness::new();
+    assert!(h.run(true, "normal").status.success());
+    fs::remove_file(h.dir.path().join("codex-calls")).unwrap();
+    assert!(!h.run(true, "recheck-shared-budget").status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "4"
+    );
+    assert!(!h.run(true, "shared-budget").status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "5"
+    );
     assert_eq!(h.count(), 1);
 }

@@ -90,3 +90,46 @@ pub fn save(
         &serde_json::json!({"analysis":analysis,"candidates":candidates,"discussions_hash":format!("{:x}",Sha256::digest(serde_json::to_vec(discussions)?))}),
     )
 }
+
+// Incomplete batches are resumable work, never publication-ready cache entries.
+#[derive(Serialize, Deserialize)]
+pub struct InFlight {
+    pub analysis: Analysis,
+    pub candidates: HashSet<String>,
+    pub inspected: HashSet<String>,
+    pub discussions: serde_json::Value,
+    pub passes: usize,
+    pub repairs_used: usize,
+}
+
+pub fn load_in_flight(
+    path: &Path,
+    reviews: &[Review],
+    issues: &[github::Issue],
+    prior: &[Finding],
+    workspace: &Path,
+) -> Result<Option<InFlight>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let saved: InFlight = match serde_json::from_slice(&bytes) {
+        Ok(saved) => saved,
+        Err(_) => return Ok(None),
+    };
+    if !saved.inspected.is_subset(&saved.candidates)
+        || !saved
+            .candidates
+            .iter()
+            .all(|url| issues.iter().any(|i| &i.url == url))
+        || analysis::validate(&saved.analysis, reviews, issues, prior, workspace).is_err()
+    {
+        return Ok(None);
+    }
+    let current = serde_json::to_value(github::reference_details(issues, &saved.inspected)?)?;
+    if current != saved.discussions {
+        return Ok(None);
+    }
+    Ok(Some(saved))
+}
