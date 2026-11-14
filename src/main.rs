@@ -1,4 +1,5 @@
 mod analysis;
+mod checkpoint;
 mod github;
 mod http;
 mod model;
@@ -47,6 +48,9 @@ enum Action {
         /// Reanalyze unchanged reviews already handled by a successful --apply run.
         #[arg(long)]
         recheck: bool,
+        /// Use only matching validated checkpoints; never invoke Codex.
+        #[arg(long)]
+        cached_only: bool,
         /// Create evidence-backed issues from validated batches; retain failed batches for retry.
         #[arg(long)]
         apply: bool,
@@ -121,6 +125,7 @@ fn main() -> Result<()> {
             model,
             timeout_seconds,
             recheck,
+            cached_only,
         } => {
             fs::create_dir_all(&state_dir)?;
             let lock = OpenOptions::new()
@@ -206,6 +211,20 @@ fn main() -> Result<()> {
                 progress.save("analyzing");
                 eprintln!("Analyzing batch {}…", index + 1);
                 let result = (|| -> Result<model::Analysis> {
+                    let key =
+                        checkpoint::key(batch, &issues, &snapshots, &findings, model.as_deref())?;
+                    let path = state_dir.join("analysis-cache").join(format!("{key}.json"));
+                    if (!recheck || cached_only)
+                        && let Some(result) =
+                            checkpoint::load(&path, batch, &issues, &findings, workspace.path())?
+                    {
+                        eprintln!("Reusing validated batch {} without Codex", index + 1);
+                        return Ok(result);
+                    }
+                    ensure!(
+                        !cached_only,
+                        "no matching analysis checkpoint; Codex was not invoked"
+                    );
                     let mut session =
                         analysis::BatchAnalysis::new(model.as_deref(), timeout_seconds);
                     let mut result = analysis::analyze(
@@ -219,6 +238,7 @@ fn main() -> Result<()> {
                     // of unrelated historical PR threads.
                     let mut inspected = std::collections::HashSet::new();
                     let mut discussion_passes = 0;
+                    let mut discussions = json!([]);
                     while !session.candidate_urls.is_subset(&inspected) {
                         progress.save("discussions");
                         ensure!(
@@ -229,6 +249,7 @@ fn main() -> Result<()> {
                         let details = github::reference_details(&issues, &session.candidate_urls)?;
                         inspected = session.candidate_urls.clone();
                         atomic_json(&workspace.path().join("matched-discussions.json"), &details)?;
+                        discussions = serde_json::to_value(&details)?;
                         result = analysis::analyze(
                             workspace.path(),
                             batch,
@@ -237,6 +258,7 @@ fn main() -> Result<()> {
                             &mut session,
                         )?;
                     }
+                    checkpoint::save(&path, &result, &session.candidate_urls, &discussions)?;
                     Ok(result)
                 })();
                 // Never let a rejected result enter the prior findings or publication set.
@@ -248,14 +270,15 @@ fn main() -> Result<()> {
                 let result = match result {
                     Ok(result) => result,
                     Err(error) => {
+                        let failure_code = analysis::failure_code(&error);
                         let (invalid_lines, empty_explanations) =
                             analysis::evidence_failure_counts(&error);
                         let keys: Vec<_> = batch.iter().map(Review::key).collect();
                         failed_keys.extend(keys.iter().cloned());
-                        batch_failures.push(json!({"batch":index + 1,"review_keys":keys,"invalid_lines":invalid_lines,"empty_explanations":empty_explanations}));
+                        batch_failures.push(json!({"batch":index + 1,"review_keys":keys,"invalid_lines":invalid_lines,"empty_explanations":empty_explanations,"failure_code":failure_code}));
                         eprintln!(
                             "{}",
-                            json!({"type":"review_triage.batch_failed","batch":index + 1,"invalid_lines":invalid_lines,"empty_explanations":empty_explanations})
+                            json!({"type":"review_triage.batch_failed","batch":index + 1,"invalid_lines":invalid_lines,"empty_explanations":empty_explanations,"failure_code":failure_code})
                         );
                         atomic_json(&state_dir.join("failed-batches.json"), &batch_failures)?;
                         eprintln!(
@@ -310,6 +333,7 @@ fn main() -> Result<()> {
             let mut report = json!({"created_at":chrono::Utc::now(),"coverage":"Apple selected territory; Google last 7 days plus supplied CSV/cache. Google API does not expose country.",
                 "snapshots":snapshots,"review_count":reviews.len(),"cached_review_count":total_reviews,"failed_review_count":failed_keys.len(),"batch_failures":batch_failures,"findings":findings,"drafts":drafts,"created_issues":[],"apply":apply});
             atomic_json(&report_path, &report)?;
+            let mut publication_pending = std::collections::HashSet::new();
             if apply {
                 progress.save("publishing");
                 let matched: std::collections::HashSet<_> = findings
@@ -319,25 +343,43 @@ fn main() -> Result<()> {
                 let mut created_urls = std::collections::HashSet::new();
                 github::check_heads(&snapshots)?;
                 let current = all_issues(false)?;
-                ensure!(
-                    github::same_issues(&issues, &current, &matched, &created_urls),
-                    "Issues/PRs changed during analysis; rerun to check for duplicates"
-                );
+                let mut published_markers: std::collections::HashSet<String> =
+                    receipts.keys().cloned().collect();
+                if !github::same_issues(&issues, &current, &matched, &created_urls) {
+                    publication_pending.extend(deferred_reviews(
+                        &findings,
+                        &issues,
+                        &current,
+                        &published_markers,
+                    ));
+                }
                 let mut expected = current;
                 let mut created = vec![];
                 for f in findings.iter().filter(|f| f.status == Status::New) {
+                    if f.review_keys
+                        .iter()
+                        .any(|key| publication_pending.contains(key))
+                    {
+                        continue;
+                    }
                     // Recheck immediately before each write, including after our own previous issue.
                     let fresh = all_issues(false)?;
-                    ensure!(
-                        github::same_issues(&expected, &fresh, &matched, &created_urls),
-                        "Issues/PRs changed; report contains partial results. Rerun."
-                    );
+                    if !github::same_issues(&expected, &fresh, &matched, &created_urls) {
+                        publication_pending.extend(deferred_reviews(
+                            &findings,
+                            &expected,
+                            &fresh,
+                            &published_markers,
+                        ));
+                        break;
+                    }
                     if receipts.contains_key(&f.marker())
                         || expected
                             .iter()
                             .chain(&fresh)
                             .any(|i| i.body.contains(&f.marker()))
                     {
+                        published_markers.insert(f.marker());
                         continue;
                     }
                     github::check_heads(&snapshots)?;
@@ -358,12 +400,14 @@ fn main() -> Result<()> {
                     progress.save("publishing");
                     created_urls.insert(url);
                     expected.push(issue);
+                    published_markers.insert(f.marker());
                 }
                 // Commit only validated reviews after their publication succeeds.
                 // Failed/uncertain reviews remain eligible; successful batches are not repeated.
                 for review in &reviews {
                     let key = review.key();
                     if failed_keys.contains(&key)
+                        || publication_pending.contains(&key)
                         || findings
                             .iter()
                             .any(|f| f.status == Status::Uncertain && f.review_keys.contains(&key))
@@ -373,9 +417,14 @@ fn main() -> Result<()> {
                         processed.insert(key, review.fingerprint());
                     }
                 }
+                progress.pending = publication_pending.len();
                 progress.save("saving");
                 atomic_json(&processed_path, &processed)?;
             }
+            let mut pending_keys: Vec<_> = publication_pending.iter().cloned().collect();
+            pending_keys.sort();
+            report["publication_pending_review_keys"] = json!(pending_keys);
+            atomic_json(&report_path, &report)?;
             eprintln!(
                 "{} actionable drafts; {} total findings. Report: {}{}",
                 drafts.len(),
@@ -387,16 +436,51 @@ fn main() -> Result<()> {
                     " (dry-run; use --apply to create issues)"
                 }
             );
-            progress.save(if batch_failures.is_empty() {
-                "complete"
-            } else {
-                "partial"
-            });
+            progress.save(
+                if batch_failures.is_empty() && publication_pending.is_empty() {
+                    "complete"
+                } else {
+                    "partial"
+                },
+            );
             ensure!(
                 batch_failures.is_empty(),
                 "some batches failed; validated reviews saved, failed reviews remain pending"
             );
+            ensure!(
+                publication_pending.is_empty(),
+                "Issue context changed; only affected reviews deferred, other validated reviews saved"
+            );
         }
     }
     Ok(())
+}
+
+fn deferred_reviews(
+    findings: &[Finding],
+    before: &[github::Issue],
+    after: &[github::Issue],
+    published: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    let mut deferred = std::collections::HashSet::new();
+    for finding in findings {
+        let new_pending = finding.status == Status::New && !published.contains(&finding.marker());
+        let changed_reference = finding.related_urls.iter().any(|url| {
+            let old = before.iter().find(|i| &i.url == url);
+            let current = after.iter().find(|i| &i.url == url);
+            match (old, current) {
+                (Some(a), Some(b)) => !github::same_issues(
+                    std::slice::from_ref(a),
+                    std::slice::from_ref(b),
+                    &std::collections::HashSet::from([url.clone()]),
+                    &Default::default(),
+                ),
+                _ => true,
+            }
+        });
+        if new_pending || changed_reference {
+            deferred.extend(finding.review_keys.iter().cloned());
+        }
+    }
+    deferred
 }

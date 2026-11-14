@@ -11,6 +11,20 @@ spec.loader.exec_module(diagnostics)
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_context_drift_is_identified_without_raw_output(self):
+        for error in ("Issues/PRs changed during analysis; rerun to check for duplicates",
+                      "TrainLCD/StationAPI changed during analysis; rerun before publishing",
+                      "Issue context changed; only affected reviews deferred, other validated reviews saved"):
+            self.assertNotIn("許可済み診断項目に該当しない", diagnostics.summarize("Error: " + error))
+
+    def test_partial_failure_retains_allowlisted_failure_reason(self):
+        event = {"type":"review_triage.batch_failed", "invalid_lines":0, "empty_explanations":0,
+                 "failure_code":"new issue has existing match"}
+        error = "\nError: some batches failed; validated reviews saved, failed reviews remain pending"
+        self.assertIn("新規判定に既存Issueの参照あり", diagnostics.summarize(json.dumps(event) + error))
+        event["failure_code"] = "PRIVATE REVIEW"
+        self.assertNotIn("PRIVATE REVIEW", diagnostics.summarize(json.dumps(event) + error))
+
     def test_partial_failure_counts_only_failed_batches(self):
         events = [
             {"type":"review_triage.invalid_evidence", "problems":[{"supplied_line":999,"file_line_count":1}]},

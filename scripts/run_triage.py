@@ -13,7 +13,7 @@ PHASES = {
     "publishing": "再照合・起票", "saving": "処理済み状態保存",
     "complete": "完了", "partial": "部分失敗", "failed": "失敗",
 }
-FIELDS = ("total", "batch", "batches", "analyzed", "failed", "created")
+FIELDS = ("total", "batch", "batches", "analyzed", "failed", "created", "pending")
 
 
 def read_progress(path):
@@ -35,7 +35,7 @@ def display(value, elapsed):
         return f"進捗待機 / 経過 {elapsed}秒"
     return (f"{PHASES[value['phase']]} / 解析済み {value['analyzed']}/{value['total']}件"
             f" / 失敗 {value['failed']}件 / バッチ {value['batch']}/{value['batches']}"
-            f" / 起票 {value['created']}件 / 経過 {elapsed}秒")
+            f" / 起票 {value['created']}件 / 再照合待ち {value['pending']}件 / 経過 {elapsed}秒")
 
 
 def main():

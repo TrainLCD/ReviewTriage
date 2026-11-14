@@ -17,7 +17,7 @@ class ProgressTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "progress.json"
             valid = dict(phase="analyzing", total=138, batch=2, batches=14,
-                         analyzed=10, failed=0, created=0, text="PRIVATE REVIEW")
+                         analyzed=10, failed=0, created=0, pending=0, text="PRIVATE REVIEW")
             path.write_text(json.dumps(valid))
             message = progress.display(progress.read_progress(path), 60)
             self.assertIn("10/138件", message)
@@ -33,7 +33,7 @@ class ProgressTests(unittest.TestCase):
             root = Path(directory)
             log, state = root / "raw.log", root / "progress.json"
             state.write_text(json.dumps(dict(phase="complete", total=999, batch=1, batches=1,
-                                            analyzed=999, failed=0, created=99)))
+                                            analyzed=999, failed=0, created=99, pending=0)))
             code = "import sys;print('PRIVATE REVIEW');print('SECRET',file=sys.stderr);sys.exit(7)"
             result = subprocess.run([sys.executable, str(SCRIPT), str(log), str(state),
                                      sys.executable, "-c", code], capture_output=True, text=True)

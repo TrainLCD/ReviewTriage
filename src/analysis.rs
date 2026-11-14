@@ -65,6 +65,43 @@ pub fn evidence_failure_counts(error: &anyhow::Error) -> (usize, usize) {
     )
 }
 
+pub fn failure_code(error: &anyhow::Error) -> String {
+    let message = error.to_string();
+    match message.as_str() {
+        "invalid destination"
+        | "invalid topic"
+        | "duplicate topic in batch; retry analysis"
+        | "missing review or reason"
+        | "unknown review key"
+        | "unknown related URL"
+        | "existing finding without source"
+        | "missing code evidence"
+        | "new finding duplicates a prior batch"
+        | "invalid issue draft"
+        | "new issue has existing match"
+        | "invalid evidence repository"
+        | "invalid source path"
+        | "source path escapes checkout"
+        | "invalid evidence line"
+        | "Codex omitted reviews; no issues published"
+        | "Codex did not produce a result"
+        | "Codex analysis failed; no issues published"
+        | "Codex analysis timed out; no issues published"
+        | "analysis sandbox failed; no issues published"
+        | "analysis commands never succeeded; no issues published"
+        | "credential-like content detected; output rejected"
+        | "discussion candidates did not converge"
+        | "no matching analysis checkpoint; Codex was not invoked" => message,
+        _ if error.downcast_ref::<serde_json::Error>().is_some() => {
+            "invalid JSON output".to_owned()
+        }
+        _ if error.downcast_ref::<std::io::Error>().is_some() => {
+            "analysis file IO failed".to_owned()
+        }
+        _ => "unclassified batch failure".to_owned(),
+    }
+}
+
 fn repair_instruction(error: &anyhow::Error) -> Option<String> {
     if error.to_string() == "new issue has existing match" {
         return Some("Your previous response classified a finding as new while citing an existing issue/PR. Reinspect those matches: use existing when they cover the concern, or uncertain when their scope is unresolved. Preserve candidate URLs so their discussions can be fetched. Do not simply delete URLs to make a new finding pass validation. Return the complete corrected findings array, preserving every review and distinct concern.\n".to_owned());

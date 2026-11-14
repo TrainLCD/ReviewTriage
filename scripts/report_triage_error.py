@@ -14,6 +14,14 @@ STAGES = {
     "install and log in to Codex CLI": "Codex CLI起動",
 }
 CAUSES = {
+    "Issue context changed; only affected reviews deferred, other validated reviews saved": "Issue・PR更新により影響する起票候補のみ保留（他の確定分は保存済み）",
+    "Issues/PRs changed during analysis; rerun to check for duplicates": "解析中にIssue・PR一覧が変化したため起票前に停止",
+    "Issues/PRs changed; report contains partial results. Rerun.": "起票中にIssue・PR一覧が変化したため追加起票を停止",
+    "discussion candidates did not converge": "既存Issue候補が議論確認の上限までに確定しない",
+    "no matching analysis checkpoint; Codex was not invoked": "再利用できる解析結果なし（AI呼び出しなし）",
+    "invalid JSON output": "解析結果のJSONが不正",
+    "analysis file IO failed": "解析ファイルの読み書きに失敗",
+    "unclassified batch failure": "分類未対応のバッチ失敗",
     "some batches failed; validated reviews saved, failed reviews remain pending": "一部バッチの解析失敗（検証済み分は保存済み、失敗分は次回再処理）",
     "analysis sandbox failed; no issues published": "解析用サンドボックスの起動失敗",
     "analysis commands never succeeded; no issues published": "解析用コマンドが一度も成功していない",
@@ -167,6 +175,8 @@ def summarize(log, sensitive=()):
             details.append("HTTP " + status.group(1))
         elif cause in CAUSES:
             details.append(CAUSES[cause])
+        elif re.fullmatch(r"TrainLCD/(?:MobileApp|StationAPI|Functions|Website) changed during analysis; rerun before publishing", cause):
+            details.append("解析中に対象コードが更新されたため起票前に停止")
         elif re.fullmatch(
             r"(?:gh|git) failed \(exit (?:exit status: [0-9]+|"
             r"signal: [0-9]+(?: \(SIG[A-Z0-9]+\))?(?: \(core dumped\))?)"
@@ -190,6 +200,9 @@ def summarize(log, sensitive=()):
                 continue
             if not isinstance(event, dict) or event.get("type") != "review_triage.batch_failed":
                 continue
+            code = event.get("failure_code")
+            if isinstance(code, str) and code in (CAUSES | STAGES):
+                detail += " / " + (CAUSES | STAGES)[code]
             a, b = event.get("invalid_lines"), event.get("empty_explanations")
             if type(a) is int and type(b) is int and 0 <= a <= 1000000 and 0 <= b <= 1000000:
                 invalid_lines += a

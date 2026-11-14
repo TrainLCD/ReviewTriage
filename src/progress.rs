@@ -9,6 +9,7 @@ pub struct Progress {
     pub analyzed: usize,
     pub failed: usize,
     pub created: usize,
+    pub pending: usize,
 }
 
 impl Progress {
@@ -22,6 +23,7 @@ impl Progress {
             analyzed: 0,
             failed: 0,
             created: 0,
+            pending: 0,
         }
     }
 
@@ -29,7 +31,7 @@ impl Progress {
         // Progress is separate from untrusted model output and contains no review text or IDs.
         let value = serde_json::json!({"phase":phase,"total":self.total,"batch":self.batch,
             "batches":self.batches,"analyzed":self.analyzed,"failed":self.failed,
-            "created":self.created,"elapsed_seconds":self.started.elapsed().as_secs()});
+            "created":self.created,"pending":self.pending,"elapsed_seconds":self.started.elapsed().as_secs()});
         if crate::atomic_json(&self.path, &value).is_err() {
             eprintln!("Could not save numeric progress; review processing continues");
         }

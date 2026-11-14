@@ -107,6 +107,11 @@ elif name=='codex':
   else: findings[0][field]='ghp_not_a_real_secret'
  if mode=='uncertain': findings[0]['status']='uncertain'
  if mode=='omitted': findings=[]
+ if mode=='issue-added':
+  for f in findings:
+   if f['review_keys']==['google:r2']: f['status']='resolved';f['topic']='other-concern'
+  if not issues:
+   issues_file.write_text(json.dumps([{'number':99,'html_url':'https://github.com/TrainLCD/StationAPI/issues/99','title':'別のIssue','body':'追加されたIssue','state':'open','updated_at':'2026-11-15T00:00:00Z','comments':0}]))
  if mode=='partial-failure' and any(e['review']['id']=='r1' for e in reviews): findings=[]
  if mode in ['new-match-once','new-match-always']:
   if mode=='new-match-always' or int(calls.read_text())==1:
@@ -195,6 +200,9 @@ elif name=='codex':
         }
         if mode == "partial-failure" {
             c.args(["--batch-size", "1"]);
+        }
+        if mode == "cached-only" {
+            c.arg("--cached-only");
         }
         if apply {
             c.arg("--apply");
@@ -335,7 +343,7 @@ fn recheck_uncertain_removes_previous_processed_fingerprint() {
 fn auth_refresh_persists_and_keyring_retains_native_storage_identity() {
     let h = Harness::new();
     for _ in 0..2 {
-        let o = h.run(false, "rotate-auth");
+        let o = h.run(false, "recheck-rotate-auth");
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     }
     assert_eq!(
@@ -598,4 +606,67 @@ fn removed_candidate_is_still_inspected_and_repair_budget_is_shared() {
             assert_eq!(report["findings"][0]["status"], "existing");
         }
     }
+}
+
+#[test]
+fn validated_checkpoint_reuses_analysis_and_cached_only_never_invokes_codex() {
+    let h = Harness::new();
+    assert!(h.run(false, "normal").status.success());
+    let before = fs::read_to_string(h.dir.path().join("codex-calls")).unwrap();
+    let output = h.run(true, "cached-only");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(h.count(), 1);
+    assert_eq!(
+        before,
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap()
+    );
+    // The created issue changed the input context: the old cache must not be reused.
+    fs::remove_file(h.dir.path().join("state/processed.json")).unwrap();
+    assert!(!h.run(true, "cached-only").status.success());
+    assert_eq!(
+        before,
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap()
+    );
+    let empty = Harness::new();
+    assert!(!empty.run(true, "cached-only").status.success());
+    assert!(!empty.dir.path().join("codex-calls").exists());
+}
+
+#[test]
+fn issue_addition_defers_new_candidate_but_saves_unaffected_reviews() {
+    let h = Harness::new();
+    let mut reviews: Vec<Value> =
+        serde_json::from_slice(&fs::read(h.dir.path().join("input.json")).unwrap()).unwrap();
+    let mut second = reviews[0].clone();
+    second["id"] = json!("r2");
+    reviews.push(second);
+    fs::write(
+        h.dir.path().join("input.json"),
+        serde_json::to_vec(&reviews).unwrap(),
+    )
+    .unwrap();
+    let output = h.run(true, "issue-added");
+    assert!(!output.status.success());
+    assert_eq!(h.count(), 1); // Only the independently added issue exists.
+    let processed: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/processed.json")).unwrap())
+            .unwrap();
+    assert!(processed.get("google:r1").is_none());
+    assert!(processed.get("google:r2").is_some());
+    let report: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap()).unwrap();
+    assert_eq!(
+        report["publication_pending_review_keys"],
+        json!(["google:r1"])
+    );
+    assert_eq!(report["created_issues"], json!([]));
+    assert!(h.run(true, "normal").status.success());
+    let report: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap()).unwrap();
+    assert_eq!(report["review_count"], 1);
+    assert_eq!(h.count(), 1);
 }
