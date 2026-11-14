@@ -27,4 +27,4 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install --yes bubblewrap
       - run: npm install --global @openai/codex
       - name: Verify read-only sandbox without API credentials
-        run: timeout 30s codex sandbox linux -c 'sandbox_mode="read-only"' -- /bin/cat Cargo.toml > /dev/null
+        run: timeout 30s codex sandbox -c 'sandbox_mode="read-only"' -- /bin/cat Cargo.toml > /dev/null
