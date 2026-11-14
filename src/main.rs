@@ -1,7 +1,9 @@
 mod analysis;
+mod checkpoint;
 mod github;
 mod http;
 mod model;
+mod progress;
 mod security;
 mod stores;
 
@@ -46,7 +48,10 @@ enum Action {
         /// Reanalyze unchanged reviews already handled by a successful --apply run.
         #[arg(long)]
         recheck: bool,
-        /// Create only evidence-backed new issues after all batches validate.
+        /// Use only matching validated checkpoints; never invoke Codex.
+        #[arg(long)]
+        cached_only: bool,
+        /// Create evidence-backed issues from validated batches; retain failed batches for retry.
         #[arg(long)]
         apply: bool,
         #[arg(long,default_value_t=10,value_parser=clap::value_parser!(u16).range(1..=50))]
@@ -120,6 +125,7 @@ fn main() -> Result<()> {
             model,
             timeout_seconds,
             recheck,
+            cached_only,
         } => {
             fs::create_dir_all(&state_dir)?;
             let lock = OpenOptions::new()
@@ -131,6 +137,8 @@ fn main() -> Result<()> {
             lock.try_lock_exclusive()
                 .context("another run is using this state directory")?;
             let state_dir = state_dir.canonicalize()?;
+            let mut progress = progress::Progress::new(state_dir.join("progress.json"));
+            progress.save("fetching");
             let pending = state_dir.join("pending-issue.json");
             let receipts_path = state_dir.join("created-issues.json");
             let receipts = github::load_receipts(&receipts_path)?;
@@ -168,6 +176,9 @@ fn main() -> Result<()> {
                 .filter(|r| recheck || processed.get(&r.key()) != Some(&r.fingerprint()))
                 .collect();
             let report_path = state_dir.join("report.json");
+            progress.total = reviews.len();
+            progress.batches = reviews.len().div_ceil(usize::from(batch_size));
+            progress.save("preparing");
             if reviews.is_empty() {
                 atomic_json(
                     &report_path,
@@ -176,6 +187,7 @@ fn main() -> Result<()> {
                 eprintln!(
                     "No new or edited text reviews to analyze (use --recheck to reanalyze processed reviews)."
                 );
+                progress.save("complete");
                 return Ok(());
             }
             eprintln!(
@@ -191,36 +203,142 @@ fn main() -> Result<()> {
             atomic_json(&workspace.path().join("github-context.json"), &issues)?;
             atomic_json(&workspace.path().join("snapshots.json"), &snapshots)?;
             let mut findings: Vec<Finding> = vec![];
+            let mut failed_keys = std::collections::HashSet::new();
+            let mut batch_failures = vec![];
+            let mut first_failure = None;
             for (index, batch) in reviews.chunks(batch_size.into()).enumerate() {
+                progress.batch = index + 1;
+                progress.save("analyzing");
                 eprintln!("Analyzing batch {}…", index + 1);
-                let mut result = analysis::analyze(
-                    workspace.path(),
-                    batch,
-                    &issues,
-                    &findings,
-                    model.as_deref(),
-                    timeout_seconds,
-                )?;
-                // Fetch full discussions/PR metadata only for actual matches, not thousands
-                // of unrelated historical PR threads.
-                let refs: std::collections::HashSet<_> = result
-                    .findings
-                    .iter()
-                    .flat_map(|f| f.related_urls.iter().cloned())
-                    .collect();
-                if !refs.is_empty() {
-                    let details = github::reference_details(&issues, &refs)?;
-                    atomic_json(&workspace.path().join("matched-discussions.json"), &details)?;
-                    result = analysis::analyze(
-                        workspace.path(),
-                        batch,
-                        &issues,
-                        &findings,
-                        model.as_deref(),
-                        timeout_seconds,
+                let result = (|| -> Result<model::Analysis> {
+                    let key =
+                        checkpoint::key(batch, &issues, &snapshots, &findings, model.as_deref())?;
+                    let path = state_dir.join("analysis-cache").join(format!("{key}.json"));
+                    if (!recheck || cached_only)
+                        && let Some(result) =
+                            checkpoint::load(&path, batch, &issues, &findings, workspace.path())?
+                    {
+                        eprintln!("Reusing validated batch {} without Codex", index + 1);
+                        return Ok(result);
+                    }
+                    ensure!(
+                        !cached_only,
+                        "no matching analysis checkpoint; Codex was not invoked"
+                    );
+                    let mut session =
+                        analysis::BatchAnalysis::new(model.as_deref(), timeout_seconds);
+                    let in_flight_path = state_dir
+                        .join("analysis-in-flight")
+                        .join(format!("{key}.json"));
+                    let saved = if recheck {
+                        None
+                    } else {
+                        checkpoint::load_in_flight(
+                            &in_flight_path,
+                            batch,
+                            &issues,
+                            &findings,
+                            workspace.path(),
+                        )?
+                    };
+                    let mut stage = if let Some(saved) = saved {
+                        eprintln!(
+                            "Resuming batch {} from its last successful analysis",
+                            index + 1
+                        );
+                        session.candidate_urls = saved.candidates.clone();
+                        session.repairs_used = saved.repairs_used;
+                        saved
+                    } else {
+                        let result = analysis::analyze(
+                            workspace.path(),
+                            batch,
+                            &issues,
+                            &findings,
+                            &mut session,
+                        )?;
+                        checkpoint::InFlight {
+                            analysis: result,
+                            candidates: session.candidate_urls.clone(),
+                            inspected: Default::default(),
+                            discussions: json!([]),
+                            passes: 0,
+                            repairs_used: session.repairs_used,
+                        }
+                    };
+                    atomic_json(&in_flight_path, &stage)?;
+                    while !session.candidate_urls.is_subset(&stage.inspected) {
+                        progress.save("discussions");
+                        ensure!(stage.passes < 3, "discussion candidates did not converge");
+                        let details = github::reference_details(&issues, &session.candidate_urls)?;
+                        let inspected = session.candidate_urls.clone();
+                        atomic_json(&workspace.path().join("matched-discussions.json"), &details)?;
+                        let result = analysis::analyze(
+                            workspace.path(),
+                            batch,
+                            &issues,
+                            &findings,
+                            &mut session,
+                        );
+                        // Even a failed call may have discovered candidates or spent repairs.
+                        // Keep the last validated result; do not mark this discussion pass done.
+                        stage.candidates = session.candidate_urls.clone();
+                        stage.repairs_used = session.repairs_used;
+                        match result {
+                            Ok(result) => {
+                                stage.analysis = result;
+                                stage.inspected = inspected;
+                                stage.discussions = serde_json::to_value(&details)?;
+                                stage.passes += 1;
+                            }
+                            Err(error) => {
+                                atomic_json(&in_flight_path, &stage)?;
+                                return Err(error);
+                            }
+                        }
+                        atomic_json(&in_flight_path, &stage)?;
+                    }
+                    checkpoint::save(
+                        &path,
+                        &stage.analysis,
+                        &stage.candidates,
+                        &stage.discussions,
                     )?;
-                    fs::remove_file(workspace.path().join("matched-discussions.json"))?;
+                    fs::remove_file(&in_flight_path)?;
+                    Ok(stage.analysis)
+                })();
+                // Never let a rejected result enter the prior findings or publication set.
+                // Clear discussion context even when the second analysis failed.
+                let discussions = workspace.path().join("matched-discussions.json");
+                if discussions.exists() {
+                    fs::remove_file(discussions)?;
                 }
+                let result = match result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let failure_code = analysis::failure_code(&error);
+                        let (invalid_lines, empty_explanations) =
+                            analysis::evidence_failure_counts(&error);
+                        let keys: Vec<_> = batch.iter().map(Review::key).collect();
+                        failed_keys.extend(keys.iter().cloned());
+                        batch_failures.push(json!({"batch":index + 1,"review_keys":keys,"invalid_lines":invalid_lines,"empty_explanations":empty_explanations,"failure_code":failure_code}));
+                        eprintln!(
+                            "{}",
+                            json!({"type":"review_triage.batch_failed","batch":index + 1,"invalid_lines":invalid_lines,"empty_explanations":empty_explanations,"failure_code":failure_code})
+                        );
+                        atomic_json(&state_dir.join("failed-batches.json"), &batch_failures)?;
+                        eprintln!(
+                            "Batch {} failed; retaining reviews for retry: {error:#}",
+                            index + 1
+                        );
+                        if first_failure.is_none() {
+                            first_failure = Some(error);
+                        }
+                        progress.failed += batch.len();
+                        progress.save("analyzing");
+                        continue;
+                    }
+                };
                 for f in result.findings {
                     if f.status == Status::Existing && f.related_urls.is_empty() {
                         let previous = findings
@@ -238,12 +356,32 @@ fn main() -> Result<()> {
                         findings.push(f);
                     }
                 }
+                progress.analyzed += batch.len();
+                progress.save("analyzing");
+            }
+            if apply && !failed_keys.is_empty() {
+                // A failed recheck invalidates even a previously processed fingerprint.
+                for key in &failed_keys {
+                    processed.remove(key);
+                }
+                if processed_path.exists() || !processed.is_empty() {
+                    atomic_json(&processed_path, &processed)?;
+                }
+            }
+            atomic_json(&state_dir.join("failed-batches.json"), &batch_failures)?;
+            if findings.is_empty()
+                && let Some(error) = first_failure
+            {
+                progress.save("failed");
+                return Err(error);
             }
             let drafts:Vec<_>=findings.iter().filter(|f|f.status==Status::New).map(|f|Ok(json!({"repository":f.repository,"title":f.title,"body":analysis::issue_body(f,&reviews,&snapshots)?}))).collect::<Result<_>>()?;
             let mut report = json!({"created_at":chrono::Utc::now(),"coverage":"Apple selected territory; Google last 7 days plus supplied CSV/cache. Google API does not expose country.",
-                "snapshots":snapshots,"review_count":reviews.len(),"cached_review_count":total_reviews,"findings":findings,"drafts":drafts,"created_issues":[],"apply":apply});
+                "snapshots":snapshots,"review_count":reviews.len(),"cached_review_count":total_reviews,"failed_review_count":failed_keys.len(),"batch_failures":batch_failures,"findings":findings,"drafts":drafts,"created_issues":[],"apply":apply});
             atomic_json(&report_path, &report)?;
+            let mut publication_pending = std::collections::HashSet::new();
             if apply {
+                progress.save("publishing");
                 let matched: std::collections::HashSet<_> = findings
                     .iter()
                     .flat_map(|f| f.related_urls.iter().cloned())
@@ -251,25 +389,43 @@ fn main() -> Result<()> {
                 let mut created_urls = std::collections::HashSet::new();
                 github::check_heads(&snapshots)?;
                 let current = all_issues(false)?;
-                ensure!(
-                    github::same_issues(&issues, &current, &matched, &created_urls),
-                    "Issues/PRs changed during analysis; rerun to check for duplicates"
-                );
+                let mut published_markers: std::collections::HashSet<String> =
+                    receipts.keys().cloned().collect();
+                if !github::same_issues(&issues, &current, &matched, &created_urls) {
+                    publication_pending.extend(deferred_reviews(
+                        &findings,
+                        &issues,
+                        &current,
+                        &published_markers,
+                    ));
+                }
                 let mut expected = current;
                 let mut created = vec![];
                 for f in findings.iter().filter(|f| f.status == Status::New) {
+                    if f.review_keys
+                        .iter()
+                        .any(|key| publication_pending.contains(key))
+                    {
+                        continue;
+                    }
                     // Recheck immediately before each write, including after our own previous issue.
                     let fresh = all_issues(false)?;
-                    ensure!(
-                        github::same_issues(&expected, &fresh, &matched, &created_urls),
-                        "Issues/PRs changed; report contains partial results. Rerun."
-                    );
+                    if !github::same_issues(&expected, &fresh, &matched, &created_urls) {
+                        publication_pending.extend(deferred_reviews(
+                            &findings,
+                            &expected,
+                            &fresh,
+                            &published_markers,
+                        ));
+                        break;
+                    }
                     if receipts.contains_key(&f.marker())
                         || expected
                             .iter()
                             .chain(&fresh)
                             .any(|i| i.body.contains(&f.marker()))
                     {
+                        published_markers.insert(f.marker());
                         continue;
                     }
                     github::check_heads(&snapshots)?;
@@ -286,24 +442,35 @@ fn main() -> Result<()> {
                     created.push(url.clone());
                     report["created_issues"] = json!(created);
                     atomic_json(&report_path, &report)?;
+                    progress.created = created.len();
+                    progress.save("publishing");
                     created_urls.insert(url);
                     expected.push(issue);
+                    published_markers.insert(f.marker());
                 }
-                // Commit processing state only after a fully successful apply. Pending or
-                // partially published runs are safely retried using stable issue markers.
+                // Commit only validated reviews after their publication succeeds.
+                // Failed/uncertain reviews remain eligible; successful batches are not repeated.
                 for review in &reviews {
                     let key = review.key();
-                    if findings
-                        .iter()
-                        .any(|f| f.status == Status::Uncertain && f.review_keys.contains(&key))
+                    if failed_keys.contains(&key)
+                        || publication_pending.contains(&key)
+                        || findings
+                            .iter()
+                            .any(|f| f.status == Status::Uncertain && f.review_keys.contains(&key))
                     {
                         processed.remove(&key);
                     } else {
                         processed.insert(key, review.fingerprint());
                     }
                 }
+                progress.pending = publication_pending.len();
+                progress.save("saving");
                 atomic_json(&processed_path, &processed)?;
             }
+            let mut pending_keys: Vec<_> = publication_pending.iter().cloned().collect();
+            pending_keys.sort();
+            report["publication_pending_review_keys"] = json!(pending_keys);
+            atomic_json(&report_path, &report)?;
             eprintln!(
                 "{} actionable drafts; {} total findings. Report: {}{}",
                 drafts.len(),
@@ -315,7 +482,51 @@ fn main() -> Result<()> {
                     " (dry-run; use --apply to create issues)"
                 }
             );
+            progress.save(
+                if batch_failures.is_empty() && publication_pending.is_empty() {
+                    "complete"
+                } else {
+                    "partial"
+                },
+            );
+            ensure!(
+                batch_failures.is_empty(),
+                "some batches failed; validated reviews saved, failed reviews remain pending"
+            );
+            ensure!(
+                publication_pending.is_empty(),
+                "Issue context changed; only affected reviews deferred, other validated reviews saved"
+            );
         }
     }
     Ok(())
+}
+
+fn deferred_reviews(
+    findings: &[Finding],
+    before: &[github::Issue],
+    after: &[github::Issue],
+    published: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    let mut deferred = std::collections::HashSet::new();
+    for finding in findings {
+        let new_pending = finding.status == Status::New && !published.contains(&finding.marker());
+        let changed_reference = finding.related_urls.iter().any(|url| {
+            let old = before.iter().find(|i| &i.url == url);
+            let current = after.iter().find(|i| &i.url == url);
+            match (old, current) {
+                (Some(a), Some(b)) => !github::same_issues(
+                    std::slice::from_ref(a),
+                    std::slice::from_ref(b),
+                    &std::collections::HashSet::from([url.clone()]),
+                    &Default::default(),
+                ),
+                _ => true,
+            }
+        });
+        if new_pending || changed_reference {
+            deferred.extend(finding.review_keys.iter().cloned());
+        }
+    }
+    deferred
 }

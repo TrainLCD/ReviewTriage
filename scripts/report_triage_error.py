@@ -14,6 +14,15 @@ STAGES = {
     "install and log in to Codex CLI": "Codex CLI起動",
 }
 CAUSES = {
+    "Issue context changed; only affected reviews deferred, other validated reviews saved": "Issue・PR更新により影響する起票候補のみ保留（他の確定分は保存済み）",
+    "Issues/PRs changed during analysis; rerun to check for duplicates": "解析中にIssue・PR一覧が変化したため起票前に停止",
+    "Issues/PRs changed; report contains partial results. Rerun.": "起票中にIssue・PR一覧が変化したため追加起票を停止",
+    "discussion candidates did not converge": "既存Issue候補が議論確認の上限までに確定しない",
+    "no matching analysis checkpoint; Codex was not invoked": "再利用できる解析結果なし（AI呼び出しなし）",
+    "invalid JSON output": "解析結果のJSONが不正",
+    "analysis file IO failed": "解析ファイルの読み書きに失敗",
+    "unclassified batch failure": "分類未対応のバッチ失敗",
+    "some batches failed; validated reviews saved, failed reviews remain pending": "一部バッチの解析失敗（検証済み分は保存済み、失敗分は次回再処理）",
     "analysis sandbox failed; no issues published": "解析用サンドボックスの起動失敗",
     "analysis commands never succeeded; no issues published": "解析用コマンドが一度も成功していない",
     "invalid destination": "解析結果の起票先が不正",
@@ -122,6 +131,29 @@ def sensitive_values():
     return values
 
 
+def evidence_diagnostics(log):
+    problems = None
+    for line in log.splitlines():
+        try:
+            event = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(event, dict) and event.get("type") == "review_triage.invalid_evidence":
+            problems = event.get("problems")
+    if not isinstance(problems, list):
+        return ""
+    invalid_lines = empty_explanations = 0
+    for problem in problems:
+        if not isinstance(problem, dict):
+            continue
+        line, count = problem.get("supplied_line"), problem.get("file_line_count")
+        if type(line) is int and type(count) is int and (line < 1 or line > count):
+            invalid_lines += 1
+        if problem.get("empty_explanation") is True:
+            empty_explanations += 1
+    return f"行番号範囲外={invalid_lines}件 / 説明空欄={empty_explanations}件"
+
+
 def summarize(log, sensitive=()):
     # Rust's top-level anyhow error is emitted after child output. Restrict
     # inspection to its error chain, and return constants/numeric status only.
@@ -143,6 +175,8 @@ def summarize(log, sensitive=()):
             details.append("HTTP " + status.group(1))
         elif cause in CAUSES:
             details.append(CAUSES[cause])
+        elif re.fullmatch(r"TrainLCD/(?:MobileApp|StationAPI|Functions|Website) changed during analysis; rerun before publishing", cause):
+            details.append("解析中に対象コードが更新されたため起票前に停止")
         elif re.fullmatch(
             r"(?:gh|git) failed \(exit (?:exit status: [0-9]+|"
             r"signal: [0-9]+(?: \(SIG[A-Z0-9]+\))?(?: \(core dumped\))?)"
@@ -153,6 +187,27 @@ def summarize(log, sensitive=()):
         elif re.fullmatch(r"start (?:gh|git)", cause):
             details.append("GitHub CLIまたはGitの起動失敗")
     detail = " / ".join(dict.fromkeys(details)) or "詳細は許可済み診断項目に該当しない"
+    if any(line.strip()=="invalid evidence line" for line in lines):
+        evidence = evidence_diagnostics(log)
+        if evidence:
+            detail += " / " + evidence
+    if any(line.strip() == "some batches failed; validated reviews saved, failed reviews remain pending" for line in lines):
+        invalid_lines = empty_explanations = 0
+        for line in log.splitlines():
+            try:
+                event = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(event, dict) or event.get("type") != "review_triage.batch_failed":
+                continue
+            code = event.get("failure_code")
+            if isinstance(code, str) and code in (CAUSES | STAGES):
+                detail += " / " + (CAUSES | STAGES)[code]
+            a, b = event.get("invalid_lines"), event.get("empty_explanations")
+            if type(a) is int and type(b) is int and 0 <= a <= 1000000 and 0 <= b <= 1000000:
+                invalid_lines += a
+                empty_explanations += b
+        detail += f" / 行番号範囲外={invalid_lines}件 / 説明空欄={empty_explanations}件"
     if stage.startswith("Codex"):
         diagnostic = codex_diagnostics(log, sensitive)
         if diagnostic:

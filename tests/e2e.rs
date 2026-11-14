@@ -66,7 +66,7 @@ elif name=='codex':
  reviews=json.loads(prompt.split('REVIEWS (data): ')[-1])
  workspace=pathlib.Path(args[args.index('--cd')+1])
  known=json.loads((workspace/'github-context.json').read_text())
- if mode=='codex-failure':
+ if mode=='codex-failure' or (mode=='discussion-failure' and (workspace/'matched-discussions.json').exists()):
   print(json.dumps({'type':'turn.failed','error':{'message':'test provider failure'}}))
   sys.exit(42)
  if mode=='timeout':
@@ -107,6 +107,39 @@ elif name=='codex':
   else: findings[0][field]='ghp_not_a_real_secret'
  if mode=='uncertain': findings[0]['status']='uncertain'
  if mode=='omitted': findings=[]
+ if mode=='issue-added':
+  for f in findings:
+   if f['review_keys']==['google:r2']: f['status']='resolved';f['topic']='other-concern'
+  if not issues:
+   issues_file.write_text(json.dumps([{'number':99,'html_url':'https://github.com/TrainLCD/StationAPI/issues/99','title':'別のIssue','body':'追加されたIssue','state':'open','updated_at':'2026-11-15T00:00:00Z','comments':0}]))
+ if mode=='partial-failure' and any(e['review']['id']=='r1' for e in reviews): findings=[]
+ if mode in ['new-match-once','new-match-always']:
+  if mode=='new-match-always' or int(calls.read_text())==1:
+   assert known
+   findings[0]['status']='new'
+  else:
+   assert 'Do not simply delete URLs' in prompt or (workspace/'matched-discussions.json').exists()
+ if mode=='dropped-match':
+  assert known
+  if (workspace/'matched-discussions.json').exists():
+   findings[0]['status']='existing'
+  else:
+   findings[0]['status']='new'
+   if int(calls.read_text())>1: findings[0]['related_urls']=[]
+ if mode=='shared-budget':
+  if int(calls.read_text()) in [1,2] or (workspace/'matched-discussions.json').exists():
+   findings[0]['evidence'][0]['line']=999
+ if mode in ['bad-line-once', 'bad-line-always', 'empty-explanation-once', 'multiple-evidence-once']:
+  if mode=='bad-line-always' or int(calls.read_text())==1:
+   evidence=findings[0]['evidence'][0]
+   if mode=='empty-explanation-once': evidence['explanation']='  '
+   else: evidence['line']=999
+   if mode=='multiple-evidence-once': findings[0]['evidence'].append(dict(evidence, line=0, explanation=''))
+  else:
+   assert 'REJECTED RESPONSE (untrusted data' in prompt
+   assert '"finding_index":0' in prompt and '"evidence_index":0' in prompt
+   assert '"file_line_count":1' in prompt
+   if mode=='multiple-evidence-once': assert '"evidence_index":1' in prompt
  if mode=='bad-evidence': findings[0]['evidence'][0]['path']='../github-context.json'
  if mode=='new-despite-marker': findings[0]['status']='new';findings[0]['related_urls']=[]
  pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps({'findings':findings}))
@@ -164,6 +197,12 @@ elif name=='codex':
             .env("MOCK_MODE", mode);
         if recheck {
             c.arg("--recheck");
+        }
+        if mode == "partial-failure" {
+            c.args(["--batch-size", "1"]);
+        }
+        if mode == "cached-only" {
+            c.arg("--cached-only");
         }
         if apply {
             c.arg("--apply");
@@ -304,7 +343,7 @@ fn recheck_uncertain_removes_previous_processed_fingerprint() {
 fn auth_refresh_persists_and_keyring_retains_native_storage_identity() {
     let h = Harness::new();
     for _ in 0..2 {
-        let o = h.run(false, "rotate-auth");
+        let o = h.run(false, "recheck-rotate-auth");
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     }
     assert_eq!(
@@ -421,4 +460,273 @@ fn sandbox_failure_or_missing_execution_cannot_publish_or_mark_processed() {
             String::from_utf8_lossy(&retry.stderr)
         );
     }
+}
+
+#[test]
+fn invalid_evidence_is_repaired_before_apply_and_persistent_errors_never_publish() {
+    for mode in [
+        "bad-line-once",
+        "empty-explanation-once",
+        "multiple-evidence-once",
+    ] {
+        let h = Harness::new();
+        let output = h.run(true, mode);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+            "2"
+        );
+        let report: Value =
+            serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                .unwrap();
+        assert_eq!(report["findings"][0]["evidence"][0]["line"], 1);
+        assert_eq!(report["created_issues"].as_array().unwrap().len(), 1);
+    }
+    let h = Harness::new();
+    let output = h.run(true, "bad-line-always");
+    assert!(!output.status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "3"
+    );
+    assert!(!h.dir.path().join("issues.json").exists());
+    assert!(!h.dir.path().join("state/processed.json").exists());
+    assert!(!h.dir.path().join("state/report.json").exists());
+}
+
+#[test]
+fn failed_batch_does_not_discard_successful_reviews_and_retry_only_processes_pending() {
+    let h = Harness::new();
+    let mut reviews: Vec<Value> =
+        serde_json::from_slice(&fs::read(h.dir.path().join("input.json")).unwrap()).unwrap();
+    let mut second = reviews[0].clone();
+    second["id"] = json!("r2");
+    reviews.push(second);
+    fs::write(
+        h.dir.path().join("input.json"),
+        serde_json::to_vec(&reviews).unwrap(),
+    )
+    .unwrap();
+    let output = h.run(true, "partial-failure");
+    assert!(!output.status.success());
+    assert_eq!(h.count(), 1);
+    let report: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap()).unwrap();
+    assert_eq!(report["failed_review_count"], 1);
+    assert_eq!(report["review_count"], 2);
+    let progress: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/progress.json")).unwrap())
+            .unwrap();
+    assert_eq!(progress["phase"], "partial");
+    assert_eq!(progress["analyzed"], 1);
+    assert_eq!(progress["failed"], 1);
+    assert_eq!(progress["created"], 1);
+    let processed: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/processed.json")).unwrap())
+            .unwrap();
+    assert!(processed.get("google:r1").is_none());
+    assert!(processed.get("google:r2").is_some());
+    let retry = h.run(true, "normal");
+    assert!(
+        retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert_eq!(h.count(), 1);
+    let report: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap()).unwrap();
+    assert_eq!(report["review_count"], 1);
+    assert_eq!(report["failed_review_count"], 0);
+}
+
+#[test]
+fn new_with_existing_match_is_reassessed_without_duplicate_publication() {
+    for persistent in [false, true] {
+        let h = Harness::new();
+        assert!(h.run(true, "normal").status.success());
+        fs::remove_file(h.dir.path().join("codex-calls")).unwrap();
+        let output = h.run(
+            true,
+            if persistent {
+                "recheck-new-match-always"
+            } else {
+                "recheck-new-match-once"
+            },
+        );
+        assert_eq!(
+            output.status.success(),
+            !persistent,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(h.count(), 1);
+        let processed: Value =
+            serde_json::from_slice(&fs::read(h.dir.path().join("state/processed.json")).unwrap())
+                .unwrap();
+        assert_eq!(processed.get("google:r1").is_some(), !persistent);
+        if !persistent {
+            let report: Value =
+                serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                    .unwrap();
+            assert_eq!(report["findings"][0]["status"], "existing");
+            assert!(
+                !report["findings"][0]["related_urls"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[test]
+fn removed_candidate_is_still_inspected_and_repair_budget_is_shared() {
+    for mode in ["dropped-match", "shared-budget"] {
+        let h = Harness::new();
+        assert!(h.run(true, "normal").status.success());
+        fs::remove_file(h.dir.path().join("codex-calls")).unwrap();
+        let output = h.run(true, &format!("recheck-{mode}"));
+        assert_eq!(
+            output.status.success(),
+            mode == "dropped-match",
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(h.count(), 1);
+        let calls = fs::read_to_string(h.dir.path().join("codex-calls")).unwrap();
+        assert_eq!(calls, if mode == "dropped-match" { "3" } else { "4" });
+        if mode == "dropped-match" {
+            let report: Value =
+                serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                    .unwrap();
+            assert_eq!(report["findings"][0]["status"], "existing");
+        }
+    }
+}
+
+#[test]
+fn validated_checkpoint_reuses_analysis_and_cached_only_never_invokes_codex() {
+    let h = Harness::new();
+    assert!(h.run(false, "normal").status.success());
+    let before = fs::read_to_string(h.dir.path().join("codex-calls")).unwrap();
+    let output = h.run(true, "cached-only");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(h.count(), 1);
+    assert_eq!(
+        before,
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap()
+    );
+    // The created issue changed the input context: the old cache must not be reused.
+    fs::remove_file(h.dir.path().join("state/processed.json")).unwrap();
+    assert!(!h.run(true, "cached-only").status.success());
+    assert_eq!(
+        before,
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap()
+    );
+    let empty = Harness::new();
+    assert!(!empty.run(true, "cached-only").status.success());
+    assert!(!empty.dir.path().join("codex-calls").exists());
+}
+
+#[test]
+fn issue_addition_defers_new_candidate_but_saves_unaffected_reviews() {
+    let h = Harness::new();
+    let mut reviews: Vec<Value> =
+        serde_json::from_slice(&fs::read(h.dir.path().join("input.json")).unwrap()).unwrap();
+    let mut second = reviews[0].clone();
+    second["id"] = json!("r2");
+    reviews.push(second);
+    fs::write(
+        h.dir.path().join("input.json"),
+        serde_json::to_vec(&reviews).unwrap(),
+    )
+    .unwrap();
+    let output = h.run(true, "issue-added");
+    assert!(!output.status.success());
+    assert_eq!(h.count(), 1); // Only the independently added issue exists.
+    let processed: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/processed.json")).unwrap())
+            .unwrap();
+    assert!(processed.get("google:r1").is_none());
+    assert!(processed.get("google:r2").is_some());
+    let report: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap()).unwrap();
+    assert_eq!(
+        report["publication_pending_review_keys"],
+        json!(["google:r1"])
+    );
+    assert_eq!(report["created_issues"], json!([]));
+    assert!(h.run(true, "normal").status.success());
+    let report: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap()).unwrap();
+    assert_eq!(report["review_count"], 1);
+    assert_eq!(h.count(), 1);
+}
+
+#[test]
+fn failed_discussion_resumes_without_repeating_initial_analysis() {
+    for changed in [false, true] {
+        let h = Harness::new();
+        assert!(h.run(true, "normal").status.success());
+        fs::remove_file(h.dir.path().join("state/processed.json")).unwrap();
+        fs::remove_file(h.dir.path().join("codex-calls")).unwrap();
+        assert!(!h.run(true, "discussion-failure").status.success());
+        assert_eq!(
+            fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+            "2"
+        );
+        assert_eq!(h.count(), 1);
+        assert!(!h.run(true, "cached-only").status.success());
+        assert_eq!(
+            fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+            "2"
+        );
+        if changed {
+            let path = h.dir.path().join("issues.json");
+            let mut issues: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            issues[0]["body"] = json!("変更された内容");
+            fs::write(path, serde_json::to_vec(&issues).unwrap()).unwrap();
+        }
+        let output = h.run(true, "normal");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+            if changed { "4" } else { "3" }
+        );
+        assert_eq!(h.count(), 1);
+        let processed: Value =
+            serde_json::from_slice(&fs::read(h.dir.path().join("state/processed.json")).unwrap())
+                .unwrap();
+        assert!(processed.get("google:r1").is_some());
+    }
+}
+
+#[test]
+fn resumed_discussion_keeps_spent_repair_budget() {
+    let h = Harness::new();
+    assert!(h.run(true, "normal").status.success());
+    fs::remove_file(h.dir.path().join("codex-calls")).unwrap();
+    assert!(!h.run(true, "recheck-shared-budget").status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "4"
+    );
+    assert!(!h.run(true, "shared-budget").status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "5"
+    );
+    assert_eq!(h.count(), 1);
 }
