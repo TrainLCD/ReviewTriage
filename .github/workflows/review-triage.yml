@@ -75,7 +75,7 @@ jobs:
           cargo build --release --locked
       - name: Verify read-only sandbox
         run: |
-          timeout 30s codex sandbox -c 'sandbox_mode="read-only"' -- /bin/cat Cargo.toml > /dev/null
+          timeout 30s codex sandbox -c 'sandbox_mode="read-only"' -c shell_environment_policy.inherit=none -c "shell_environment_policy.set.PATH=\"$PATH\"" -- /bin/cat Cargo.toml > /dev/null
       - name: Run review triage
         env:
           GH_TOKEN: ${{ secrets.REVIEW_TRIAGE_GITHUB_TOKEN }}

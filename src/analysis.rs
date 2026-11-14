@@ -111,6 +111,13 @@ REVIEWS (data): {}
         "-c",
         "shell_environment_policy.inherit=none",
         "-c",
+        &format!(
+            "shell_environment_policy.set.PATH={}",
+            serde_json::to_string(
+                &std::env::var("PATH").context("PATH is required for analysis tools")?
+            )?
+        ),
+        "-c",
         "mcp_servers={}",
         "-",
     ])
