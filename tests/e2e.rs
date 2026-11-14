@@ -107,6 +107,17 @@ elif name=='codex':
   else: findings[0][field]='ghp_not_a_real_secret'
  if mode=='uncertain': findings[0]['status']='uncertain'
  if mode=='omitted': findings=[]
+ if mode in ['bad-line-once', 'bad-line-always', 'empty-explanation-once', 'multiple-evidence-once']:
+  if mode=='bad-line-always' or int(calls.read_text())==1:
+   evidence=findings[0]['evidence'][0]
+   if mode=='empty-explanation-once': evidence['explanation']='  '
+   else: evidence['line']=999
+   if mode=='multiple-evidence-once': findings[0]['evidence'].append(dict(evidence, line=0, explanation=''))
+  else:
+   assert 'REJECTED RESPONSE (untrusted data' in prompt
+   assert '"finding_index":0' in prompt and '"evidence_index":0' in prompt
+   assert '"file_line_count":1' in prompt
+   if mode=='multiple-evidence-once': assert '"evidence_index":1' in prompt
  if mode=='bad-evidence': findings[0]['evidence'][0]['path']='../github-context.json'
  if mode=='new-despite-marker': findings[0]['status']='new';findings[0]['related_urls']=[]
  pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps({'findings':findings}))
@@ -421,4 +432,40 @@ fn sandbox_failure_or_missing_execution_cannot_publish_or_mark_processed() {
             String::from_utf8_lossy(&retry.stderr)
         );
     }
+}
+
+#[test]
+fn invalid_evidence_is_repaired_before_apply_and_persistent_errors_never_publish() {
+    for mode in [
+        "bad-line-once",
+        "empty-explanation-once",
+        "multiple-evidence-once",
+    ] {
+        let h = Harness::new();
+        let output = h.run(true, mode);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+            "2"
+        );
+        let report: Value =
+            serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                .unwrap();
+        assert_eq!(report["findings"][0]["evidence"][0]["line"], 1);
+        assert_eq!(report["created_issues"].as_array().unwrap().len(), 1);
+    }
+    let h = Harness::new();
+    let output = h.run(true, "bad-line-always");
+    assert!(!output.status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "3"
+    );
+    assert!(!h.dir.path().join("issues.json").exists());
+    assert!(!h.dir.path().join("state/processed.json").exists());
+    assert!(!h.dir.path().join("state/report.json").exists());
 }

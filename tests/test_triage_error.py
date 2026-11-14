@@ -11,6 +11,17 @@ spec.loader.exec_module(diagnostics)
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_evidence_diagnostics_disambiguate_without_echoing_model_text(self):
+        event = {"type": "review_triage.invalid_evidence", "problems": [
+            {"supplied_line": 999, "file_line_count": 1, "empty_explanation": False},
+            {"supplied_line": 1, "file_line_count": 1, "empty_explanation": True,
+             "path": "PRIVATE REVIEW", "explanation": "PRIVATE REVIEW"},
+        ]}
+        message = diagnostics.summarize(json.dumps(event) + "\nError: invalid evidence line\n")
+        self.assertIn("行番号範囲外=1件", message)
+        self.assertIn("説明空欄=1件", message)
+        self.assertNotIn("PRIVATE REVIEW", message)
+
     def test_sandbox_failure_has_fixed_diagnostic(self):
         for error in ("analysis sandbox failed; no issues published",
                       "analysis commands never succeeded; no issues published"):

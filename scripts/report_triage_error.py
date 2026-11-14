@@ -122,6 +122,29 @@ def sensitive_values():
     return values
 
 
+def evidence_diagnostics(log):
+    problems = None
+    for line in log.splitlines():
+        try:
+            event = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(event, dict) and event.get("type") == "review_triage.invalid_evidence":
+            problems = event.get("problems")
+    if not isinstance(problems, list):
+        return ""
+    invalid_lines = empty_explanations = 0
+    for problem in problems:
+        if not isinstance(problem, dict):
+            continue
+        line, count = problem.get("supplied_line"), problem.get("file_line_count")
+        if type(line) is int and type(count) is int and (line < 1 or line > count):
+            invalid_lines += 1
+        if problem.get("empty_explanation") is True:
+            empty_explanations += 1
+    return f"行番号範囲外={invalid_lines}件 / 説明空欄={empty_explanations}件"
+
+
 def summarize(log, sensitive=()):
     # Rust's top-level anyhow error is emitted after child output. Restrict
     # inspection to its error chain, and return constants/numeric status only.
@@ -153,6 +176,10 @@ def summarize(log, sensitive=()):
         elif re.fullmatch(r"start (?:gh|git)", cause):
             details.append("GitHub CLIまたはGitの起動失敗")
     detail = " / ".join(dict.fromkeys(details)) or "詳細は許可済み診断項目に該当しない"
+    if any(line.strip()=="invalid evidence line" for line in lines):
+        evidence = evidence_diagnostics(log)
+        if evidence:
+            detail += " / " + evidence
     if stage.startswith("Codex"):
         diagnostic = codex_diagnostics(log, sensitive)
         if diagnostic:
