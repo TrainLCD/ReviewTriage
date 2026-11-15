@@ -24,6 +24,25 @@ class StateSelectionTests(unittest.TestCase):
         jobs = jobs or {}
         return state.select_run(runs, current, lambda i: jobs.get(i, []))
 
+    def test_workflow_state_source_is_explicit_and_branch_escaped(self):
+        self.assertEqual(
+            state.workflow_runs_endpoint(
+                "TrainLCD/ReviewTriage", "verify/complete-pr20-20261115",
+                "complete-pr20-20261115.yml", "push"),
+            "repos/TrainLCD/ReviewTriage/actions/workflows/complete-pr20-20261115.yml/runs"
+            "?branch=verify%2Fcomplete-pr20-20261115&event=push&per_page=100",
+        )
+        self.assertEqual(
+            state.workflow_runs_endpoint(
+                "TrainLCD/ReviewTriage", "main", "review-triage.yml", "workflow_dispatch"),
+            "repos/TrainLCD/ReviewTriage/actions/workflows/review-triage.yml/runs"
+            "?branch=main&event=workflow_dispatch&per_page=100",
+        )
+        with self.assertRaises(ValueError):
+            state.workflow_runs_endpoint("o/r", "main", "../other.yml", "push")
+        with self.assertRaises(ValueError):
+            state.workflow_runs_endpoint("o/r", "main", "review-triage.yml", "rerun")
+
     def test_first_run(self):
         self.assertEqual(self.select([run(30)]), (None, False))
 

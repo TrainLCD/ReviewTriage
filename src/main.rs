@@ -297,7 +297,9 @@ fn main() -> Result<()> {
                     atomic_json(&in_flight_path, &stage)?;
                     while !session.candidate_urls.is_subset(&stage.inspected) {
                         progress.save("discussions");
-                        ensure!(stage.passes < 3, "discussion candidates did not converge");
+                        // Additional candidate Issues may be discovered one at a time.
+                        // Keep the bound finite; never accept an uninspected match.
+                        ensure!(stage.passes < 6, "discussion candidates did not converge");
                         let details = github::reference_details(&issues, &session.candidate_urls)?;
                         let inspected = session.candidate_urls.clone();
                         atomic_json(&workspace.path().join("matched-discussions.json"), &details)?;
