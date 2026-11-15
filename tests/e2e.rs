@@ -238,7 +238,10 @@ elif name=='codex':
         if recheck {
             c.arg("--recheck");
         }
-        if mode == "partial-failure" || mode == "shared-resolved" || mode == "prior-cross-source-update" {
+        if mode == "partial-failure"
+            || mode == "shared-resolved"
+            || mode == "prior-cross-source-update"
+        {
             c.args(["--batch-size", "1"]);
         }
         if mode == "cached-only" {
@@ -976,13 +979,27 @@ fn merged_prior_new_finding_preserves_later_batch_source_dependencies() {
     assert_eq!(findings.len(), 1, "the two batches should share one issue");
     assert_eq!(findings[0]["review_keys"].as_array().unwrap().len(), 2);
     let evidence = findings[0]["evidence"].as_array().unwrap();
-    assert!(evidence.iter().any(|e| e["repository"] == "TrainLCD/MobileApp"));
-    assert!(evidence.iter().any(|e| e["repository"] == "TrainLCD/StationAPI"));
+    assert!(
+        evidence
+            .iter()
+            .any(|e| e["repository"] == "TrainLCD/MobileApp")
+    );
+    assert!(
+        evidence
+            .iter()
+            .any(|e| e["repository"] == "TrainLCD/StationAPI")
+    );
     let pending = report["source_pending_review_keys"].as_array().unwrap();
     assert_eq!(pending.len(), 2);
     assert!(pending.contains(&json!("google:r1")));
     assert!(pending.contains(&json!("google:r2")));
-    assert_eq!(report["publication_pending_review_keys"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        report["publication_pending_review_keys"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     let processed = read_state(&h, "processed.json");
     assert!(processed.get("google:r1").is_none());
     assert!(processed.get("google:r2").is_none());
