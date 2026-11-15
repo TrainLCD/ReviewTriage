@@ -400,6 +400,18 @@ fn main() -> Result<()> {
                         previous.review_keys.extend(f.review_keys);
                         previous.review_keys.sort();
                         previous.review_keys.dedup();
+                        // Source changes must invalidate every review linked to the
+                        // shared finding, including evidence from later batches.
+                        for evidence in f.evidence {
+                            if !previous.evidence.iter().any(|existing| {
+                                existing.repository == evidence.repository
+                                    && existing.path == evidence.path
+                                    && existing.line == evidence.line
+                                    && existing.explanation == evidence.explanation
+                            }) {
+                                previous.evidence.push(evidence);
+                            }
+                        }
                     } else {
                         findings.push(f);
                     }
