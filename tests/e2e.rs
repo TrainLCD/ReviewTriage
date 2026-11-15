@@ -35,7 +35,7 @@ elif name=='gh':
    print('[[]]' if mode=='hidden-list' else json.dumps([[i for i in issues if f'/{repo}/' in i['html_url']]]))
  else:
   endpoint=args[-1]
-  if '/commits/' in endpoint: print(json.dumps({'sha':('b' if mode=='stale' or ('StationAPI' in endpoint and (mode in ['rules-update','rules-evidence','source-update','cross-source-update','source-new','shared-source-update'] or (root/'code-update').exists())) else 'a')*40}))
+  if '/commits/' in endpoint: print(json.dumps({'sha':('b' if mode=='stale' or ('StationAPI' in endpoint and (mode in ['rules-update','rules-evidence','source-update','cross-source-update','source-new','shared-source-update','prior-cross-source-update'] or (root/'code-update').exists())) else 'a')*40}))
   elif '/compare/' in endpoint: print(json.dumps({'status':'ahead','files':[{'filename':'AGENTS.md' if mode in ['rules-update','rules-evidence'] else 'source.rs','status':'modified'}]}))
   elif '/issues/' in endpoint: print('{}')
   else: print(json.dumps({'default_branch':'main'}))
@@ -121,6 +121,13 @@ elif name=='codex':
  if mode=='rules-evidence': findings[0]['evidence'][0]['path']='AGENTS.md'
  if mode=='source-new':
   for f in findings: f['status']='new'
+ if mode=='prior-cross-source-update':
+  f=findings[0]
+  f['topic']='cross-source-matched'
+  f['repository']='TrainLCD/MobileApp'
+  f['related_urls']=[]
+  f['status']='new' if reviews[0]['review']['id']=='r1' else 'existing'
+  f['evidence'][0]['repository']='TrainLCD/MobileApp' if f['status']=='new' else 'TrainLCD/StationAPI'
  if mode=='grouped-new' and len(findings)>1:
   findings[0]['review_keys']=[e['review_key'] for e in reviews];findings=findings[:1]
  if mode=='shared-source-update' and len(findings)>1:
@@ -133,10 +140,11 @@ elif name=='codex':
   findings[1]['repository']='TrainLCD/MobileApp'
   findings[1]['evidence'][0]['repository']='TrainLCD/MobileApp'
   findings[1]['review_keys']=[e['review_key'] for e in reviews]
- if mode=='discussion-chain':
+ if mode in ['discussion-chain', 'discussion-overflow']:
   n=int(calls.read_text())
   findings[0]['status']='existing'
-  findings[0]['related_urls']=[known[min(n-1,4)]['url']]
+  limit=6 if mode=='discussion-overflow' else 4
+  findings[0]['related_urls']=[known[min(n-1,limit)]['url']]
  if mode=='uncertain': findings[0]['status']='uncertain'
  if mode=='omitted': findings=[]
  if mode=='issue-added':
@@ -230,7 +238,10 @@ elif name=='codex':
         if recheck {
             c.arg("--recheck");
         }
-        if mode == "partial-failure" || mode == "shared-resolved" {
+        if mode == "partial-failure"
+            || mode == "shared-resolved"
+            || mode == "prior-cross-source-update"
+        {
             c.args(["--batch-size", "1"]);
         }
         if mode == "cached-only" {
@@ -778,6 +789,64 @@ fn additional_discussion_passes_converge_without_ignoring_new_candidates() {
 }
 
 #[test]
+fn discussion_limit_is_per_run_and_the_journal_survives_the_limit() {
+    let h = Harness::new();
+    let issues: Vec<_> = (1..=7)
+        .map(|i| {
+            json!({
+                "number": i,
+                "html_url": format!("https://github.com/TrainLCD/StationAPI/issues/{i}"),
+                "title": format!("関連課題 {i}"),
+                "body": format!("同種の駅名課題 {i}"),
+                "state": "open",
+                "updated_at": "2026-11-12T00:00:00Z",
+                "comments": 0
+            })
+        })
+        .collect();
+    fs::write(
+        h.dir.path().join("issues.json"),
+        serde_json::to_vec(&issues).unwrap(),
+    )
+    .unwrap();
+
+    let failed = h.run(true, "discussion-overflow");
+    assert!(!failed.status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "7"
+    );
+    assert_eq!(h.count(), 7);
+
+    let in_flight_dir = h.dir.path().join("state/analysis-in-flight");
+    let journals: Vec<_> = fs::read_dir(&in_flight_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(journals.len(), 1);
+    let stage: Value = serde_json::from_slice(&fs::read(&journals[0]).unwrap()).unwrap();
+    assert_eq!(stage["passes"], 6);
+
+    let retried = h.run(true, "discussion-overflow");
+    assert!(
+        retried.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retried.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "8"
+    );
+    assert_eq!(h.count(), 7);
+    assert!(read_state(&h, "processed.json").get("google:r1").is_some());
+    assert!(h.run(true, "discussion-overflow").status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "8"
+    );
+}
+
+#[test]
 fn failed_discussion_resumes_without_repeating_initial_analysis() {
     for changed in [false, true] {
         let h = Harness::new();
@@ -895,6 +964,47 @@ fn source_update_defers_only_dependent_reviews_and_saves_other_results() {
         );
     }
 }
+#[test]
+fn merged_prior_new_finding_preserves_later_batch_source_dependencies() {
+    let h = Harness::new();
+    add_second_review(&h);
+    let output = h.run(true, "prior-cross-source-update");
+    assert!(
+        !output.status.success(),
+        "a changed cited source must defer publication"
+    );
+    assert_eq!(h.count(), 0, "the affected new issue must not be published");
+    let report = read_state(&h, "report.json");
+    let findings = report["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1, "the two batches should share one issue");
+    assert_eq!(findings[0]["review_keys"].as_array().unwrap().len(), 2);
+    let evidence = findings[0]["evidence"].as_array().unwrap();
+    assert!(
+        evidence
+            .iter()
+            .any(|e| e["repository"] == "TrainLCD/MobileApp")
+    );
+    assert!(
+        evidence
+            .iter()
+            .any(|e| e["repository"] == "TrainLCD/StationAPI")
+    );
+    let pending = report["source_pending_review_keys"].as_array().unwrap();
+    assert_eq!(pending.len(), 2);
+    assert!(pending.contains(&json!("google:r1")));
+    assert!(pending.contains(&json!("google:r2")));
+    assert_eq!(
+        report["publication_pending_review_keys"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let processed = read_state(&h, "processed.json");
+    assert!(processed.get("google:r1").is_none());
+    assert!(processed.get("google:r2").is_none());
+}
+
 #[test]
 fn shared_unpublished_finding_keeps_every_linked_review_pending() {
     let h = Harness::new();

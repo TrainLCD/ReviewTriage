@@ -298,11 +298,17 @@ fn main() -> Result<()> {
                         }
                     };
                     atomic_json(&in_flight_path, &stage)?;
+                    // Bound discussion calls per execution; the checkpoint retains
+                    // its lifetime pass count and spent repair budget.
+                    let mut passes_this_execution = 0;
                     while !session.candidate_urls.is_subset(&stage.inspected) {
                         progress.save("discussions");
                         // Additional candidate Issues may be discovered one at a time.
                         // Keep the bound finite; never accept an uninspected match.
-                        ensure!(stage.passes < 6, "discussion candidates did not converge");
+                        ensure!(
+                            passes_this_execution < 6,
+                            "discussion candidates did not converge"
+                        );
                         let details = github::reference_details(&issues, &session.candidate_urls)?;
                         let inspected = session.candidate_urls.clone();
                         atomic_json(&workspace.path().join("matched-discussions.json"), &details)?;
@@ -323,6 +329,7 @@ fn main() -> Result<()> {
                                 stage.inspected = inspected;
                                 stage.discussions = serde_json::to_value(&details)?;
                                 stage.passes += 1;
+                                passes_this_execution += 1;
                             }
                             Err(error) => {
                                 atomic_json(&in_flight_path, &stage)?;
@@ -393,6 +400,18 @@ fn main() -> Result<()> {
                         previous.review_keys.extend(f.review_keys);
                         previous.review_keys.sort();
                         previous.review_keys.dedup();
+                        // Source changes must invalidate every review linked to the
+                        // shared finding, including evidence from later batches.
+                        for evidence in f.evidence {
+                            if !previous.evidence.iter().any(|existing| {
+                                existing.repository == evidence.repository
+                                    && existing.path == evidence.path
+                                    && existing.line == evidence.line
+                                    && existing.explanation == evidence.explanation
+                            }) {
+                                previous.evidence.push(evidence);
+                            }
+                        }
                     } else {
                         findings.push(f);
                     }
