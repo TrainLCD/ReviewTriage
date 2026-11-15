@@ -371,9 +371,9 @@ pub fn import_legacy(state: &Path) -> Result<()> {
     // could replace report.json, so matching store:id alone is unsafe.
     // Only reports containing fingerprints captured with their findings
     // can authorize a legacy migration.
-    let Ok(fingerprints) = serde_json::from_value::<HashMap<String, String>>(
-        report["review_fingerprints"].clone(),
-    ) else {
+    let Ok(fingerprints) =
+        serde_json::from_value::<HashMap<String, String>>(report["review_fingerprints"].clone())
+    else {
         return Ok(());
     };
     let (Ok(findings), Ok(snapshots)) = (
