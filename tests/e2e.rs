@@ -314,7 +314,13 @@ fn credential_patterns_in_every_model_field_never_reach_github_or_report() {
         assert!(!o.status.success());
         assert_eq!(h.count(), 0);
         assert!(!String::from_utf8_lossy(&o.stderr).contains("ghp_not_a_real_secret"));
-        assert!(!h.dir.path().join("state/report.json").exists());
+        if h.dir.path().join("state/report.json").exists() {
+            let report: Value =
+                serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                    .unwrap();
+            assert!(report["findings"].as_array().unwrap().is_empty());
+            assert!(report["drafts"].as_array().unwrap().is_empty());
+        }
     }
 }
 
@@ -453,7 +459,13 @@ fn persistent_duplicate_topics_stop_without_publishing() {
         fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
         "3"
     );
-    assert!(!h.dir.path().join("state/report.json").exists());
+    if h.dir.path().join("state/report.json").exists() {
+        let report: Value =
+            serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                .unwrap();
+        assert!(report["findings"].as_array().unwrap().is_empty());
+        assert!(report["drafts"].as_array().unwrap().is_empty());
+    }
 }
 
 #[test]
@@ -469,7 +481,13 @@ fn sandbox_failure_or_missing_execution_cannot_publish_or_mark_processed() {
         assert!(!output.status.success());
         assert!(!h.dir.path().join("issues.json").exists());
         assert!(!h.dir.path().join("state/processed.json").exists());
-        assert!(!h.dir.path().join("state/report.json").exists());
+        if h.dir.path().join("state/report.json").exists() {
+            let report: Value =
+                serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                    .unwrap();
+            assert!(report["findings"].as_array().unwrap().is_empty());
+            assert!(report["drafts"].as_array().unwrap().is_empty());
+        }
         // The same review remains eligible and succeeds on a healthy retry.
         let retry = h.run(true, "normal");
         assert!(
@@ -513,7 +531,13 @@ fn invalid_evidence_is_repaired_before_apply_and_persistent_errors_never_publish
     );
     assert!(!h.dir.path().join("issues.json").exists());
     assert!(!h.dir.path().join("state/processed.json").exists());
-    assert!(!h.dir.path().join("state/report.json").exists());
+    if h.dir.path().join("state/report.json").exists() {
+        let report: Value =
+            serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                .unwrap();
+        assert!(report["findings"].as_array().unwrap().is_empty());
+        assert!(report["drafts"].as_array().unwrap().is_empty());
+    }
 }
 
 #[test]
@@ -998,4 +1022,21 @@ fn discussion_change_invalidates_only_the_review_citing_it() {
     let processed = read_state(&h, "processed.json");
     assert!(processed.get("google:r1").is_none());
     assert!(processed.get("google:r2").is_some());
+}
+
+#[test]
+fn all_cache_misses_replace_the_old_report_with_current_failure_counts() {
+    let h = Harness::new();
+    assert!(h.run(false, "uncertain").status.success());
+    let output = h.run(true, "cached-only");
+    assert!(!output.status.success());
+    let report = read_state(&h, "report.json");
+    assert_eq!(report["failed_review_count"], 1);
+    assert_eq!(report["reused_review_count"], 0);
+    assert_eq!(report["cache_rejections"]["no_definite_record"], 1);
+    assert!(report["findings"].as_array().unwrap().is_empty());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "1"
+    );
 }

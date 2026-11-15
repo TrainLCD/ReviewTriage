@@ -11,6 +11,10 @@ on:
         description: Reanalyze previously processed reviews
         type: boolean
         default: false
+      state_run_id:
+        description: Optional completed recovery run ID (newer production state takes precedence)
+        type: string
+        default: ''
       territory:
         description: App Store territory (ISO alpha-3)
         type: string
@@ -38,6 +42,7 @@ jobs:
         id: state
         env:
           GH_TOKEN: ${{ github.token }}
+          STATE_RUN_ID: ${{ inputs.state_run_id }}
         run: |
           set -euo pipefail
           if [[ "$GITHUB_RUN_ATTEMPT" != 1 ]]; then
@@ -53,7 +58,7 @@ jobs:
               --name review-triage-state --dir state
           fi
           touch state/checkpoint
-          rm -f state/report.json
+          # Keep report.json until legacy cache migration has read it.
           echo "ready=true" >> "$GITHUB_OUTPUT"
           if [[ "$stale" == true ]]; then
             echo "::error::A newer request already ran. State was preserved; start a new workflow run."

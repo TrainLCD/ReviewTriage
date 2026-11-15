@@ -107,6 +107,21 @@ class StateSelectionTests(unittest.TestCase):
                 20: [job("2026-11-13T02:00:00Z")]
             })
 
+    def test_recovery_does_not_roll_back_newer_production_state(self):
+        runs = state.include_recovery([run(20)], "10", lambda i: run(i))
+        self.assertEqual(self.select(runs, jobs={10:[job("2026-11-13T01:00:00Z")],20:[job("2026-11-13T02:00:00Z")]}), (20, False))
+
+    def test_newer_recovery_is_selected(self):
+        runs = state.include_recovery([run(10)], "20", lambda i: run(i, "failure"))
+        self.assertEqual(self.select(runs, jobs={10:[job("2026-11-13T01:00:00Z")],20:[job("2026-11-13T02:00:00Z")]}), (20, False))
+
+    def test_invalid_recovery_id_and_duplicate_are_safe(self):
+        def forbidden(_):
+            self.fail("must not fetch")
+        with self.assertRaises(ValueError):
+            state.include_recovery([], "../../other", forbidden)
+        self.assertEqual(state.include_recovery([run(10)], "10", forbidden), [run(10)])
+
 
 if __name__ == "__main__":
     unittest.main()
