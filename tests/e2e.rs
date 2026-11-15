@@ -133,10 +133,11 @@ elif name=='codex':
   findings[1]['repository']='TrainLCD/MobileApp'
   findings[1]['evidence'][0]['repository']='TrainLCD/MobileApp'
   findings[1]['review_keys']=[e['review_key'] for e in reviews]
- if mode=='discussion-chain':
+ if mode in ['discussion-chain', 'discussion-overflow']:
   n=int(calls.read_text())
   findings[0]['status']='existing'
-  findings[0]['related_urls']=[known[min(n-1,4)]['url']]
+  limit=6 if mode=='discussion-overflow' else 4
+  findings[0]['related_urls']=[known[min(n-1,limit)]['url']]
  if mode=='uncertain': findings[0]['status']='uncertain'
  if mode=='omitted': findings=[]
  if mode=='issue-added':
@@ -774,6 +775,64 @@ fn additional_discussion_passes_converge_without_ignoring_new_candidates() {
     assert_eq!(
         fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
         "6"
+    );
+}
+
+#[test]
+fn discussion_limit_is_per_run_and_the_journal_survives_the_limit() {
+    let h = Harness::new();
+    let issues: Vec<_> = (1..=7)
+        .map(|i| {
+            json!({
+                "number": i,
+                "html_url": format!("https://github.com/TrainLCD/StationAPI/issues/{i}"),
+                "title": format!("関連課題 {i}"),
+                "body": format!("同種の駅名課題 {i}"),
+                "state": "open",
+                "updated_at": "2026-11-12T00:00:00Z",
+                "comments": 0
+            })
+        })
+        .collect();
+    fs::write(
+        h.dir.path().join("issues.json"),
+        serde_json::to_vec(&issues).unwrap(),
+    )
+    .unwrap();
+
+    let failed = h.run(true, "discussion-overflow");
+    assert!(!failed.status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "7"
+    );
+    assert_eq!(h.count(), 7);
+
+    let in_flight_dir = h.dir.path().join("state/analysis-in-flight");
+    let journals: Vec<_> = fs::read_dir(&in_flight_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(journals.len(), 1);
+    let stage: Value = serde_json::from_slice(&fs::read(&journals[0]).unwrap()).unwrap();
+    assert_eq!(stage["passes"], 6);
+
+    let retried = h.run(true, "discussion-overflow");
+    assert!(
+        retried.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retried.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "8"
+    );
+    assert_eq!(h.count(), 7);
+    assert!(read_state(&h, "processed.json").get("google:r1").is_some());
+    assert!(h.run(true, "discussion-overflow").status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "8"
     );
 }
 
