@@ -868,6 +868,17 @@ fn edited_legacy_review_cannot_reuse_an_old_analysis() {
         let h = Harness::new();
         assert!(h.run(false, "all-resolved").status.success());
         fs::remove_dir_all(h.dir.path().join("state/review-cache")).unwrap();
+        // Keep the completed legacy payload available to import_legacy, but
+        // prevent the independent, valid batch-checkpoint fallback from
+        // masking the migration-specific regression.
+        let cache_dir = h.dir.path().join("state/analysis-cache");
+        let checkpoint = fs::read_dir(&cache_dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::rename(checkpoint, cache_dir.join("legacy-only.json")).unwrap();
         if missing_fingerprints {
             let path = h.dir.path().join("state/report.json");
             let mut report: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
