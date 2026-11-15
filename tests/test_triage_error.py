@@ -47,7 +47,7 @@ class DiagnosticsTests(unittest.TestCase):
              "failure_code": "invalid evidence line", "invalid_lines": 1, "empty_explanations": 3,
              "private_review": "PRIVATE REVIEW"},
         ]
-        log = "\\n".join(map(json.dumps, events)) + "\\nError: invalid evidence line\\n"
+        log = "\n".join(map(json.dumps, events)) + "\nError: invalid evidence line\n"
         result = diagnostics.summarize(log)
         self.assertIn("行番号範囲外=3件", result)
         self.assertIn("説明空欄=3件", result)
