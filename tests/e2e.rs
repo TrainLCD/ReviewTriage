@@ -114,6 +114,8 @@ elif name=='codex':
    if mode=='mobile-resolved' or (mode in ['source-update','cross-source-update','source-new'] and entry['review']['id']=='r2'):
     f['repository']='TrainLCD/MobileApp'
     if mode!='cross-source-update': f['evidence'][0]['repository']='TrainLCD/MobileApp'
+ if mode=='shared-resolved':
+  for f,entry in zip(findings,reviews): f['status']='resolved';f['related_urls']=[];f['reason']='Confirmed '+entry['review']['id']
  if mode=='rules-evidence': findings[0]['evidence'][0]['path']='AGENTS.md'
  if mode=='source-new':
   for f in findings: f['status']='new'
@@ -212,7 +214,7 @@ elif name=='codex':
         if recheck {
             c.arg("--recheck");
         }
-        if mode == "partial-failure" {
+        if mode == "partial-failure" || mode == "shared-resolved" {
             c.args(["--batch-size", "1"]);
         }
         if mode == "cached-only" {
@@ -931,5 +933,33 @@ fn unaffected_new_issue_is_published_despite_other_repository_change() {
             .as_str()
             .unwrap()
             .contains("/MobileApp/")
+    );
+}
+
+#[test]
+fn distinct_definite_findings_for_same_topic_are_all_reused() {
+    let h = Harness::new();
+    add_second_review(&h);
+    assert!(h.run(false, "shared-resolved").status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "2"
+    );
+    let output = h.run(true, "cached-only");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "2"
+    );
+    let report = read_state(&h, "report.json");
+    assert_eq!(report["reused_review_count"], 2);
+    assert_eq!(report["findings"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        read_state(&h, "processed.json").as_object().unwrap().len(),
+        2
     );
 }

@@ -256,13 +256,17 @@ pub fn restore(
             continue;
         }
         // Split records from the same multi-review finding must be rejoined;
-        // incompatible results for the same topic are reanalyzed, never overwritten.
+        // incompatible NEW drafts for the same topic are reanalyzed, never overwritten.
+        // Definite existing/resolved/ignore findings may describe different reviews
+        // with different reasons for the same topic, just as across normal batches.
         let mut compatible = true;
         for f in &record.analysis.findings {
-            if let Some(previous) = findings
-                .iter()
-                .find(|p| p.repository == f.repository && p.topic == f.topic)
-            {
+            if let Some(previous) = findings.iter().find(|p| {
+                p.repository == f.repository
+                    && p.topic == f.topic
+                    && p.status == Status::New
+                    && f.status == Status::New
+            }) {
                 let mut p = previous.clone();
                 p.review_keys.clear();
                 let mut n = f.clone();
@@ -277,13 +281,18 @@ pub fn restore(
             continue;
         }
         for f in record.analysis.findings {
-            if let Some(previous) = findings
-                .iter_mut()
-                .find(|p| p.repository == f.repository && p.topic == f.topic)
-            {
-                previous.review_keys.extend(f.review_keys);
-                previous.review_keys.sort();
-                previous.review_keys.dedup();
+            let mut normalized = f.clone();
+            normalized.review_keys.clear();
+            let fingerprint = digest(&normalized)?;
+            let index = findings.iter().position(|previous| {
+                let mut p = previous.clone();
+                p.review_keys.clear();
+                digest(&p).is_ok_and(|value| value == fingerprint)
+            });
+            if let Some(index) = index {
+                findings[index].review_keys.extend(f.review_keys);
+                findings[index].review_keys.sort();
+                findings[index].review_keys.dedup();
             } else {
                 findings.push(f);
             }
