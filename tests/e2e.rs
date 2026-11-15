@@ -731,24 +731,40 @@ fn issue_addition_defers_new_candidate_but_saves_unaffected_reviews() {
 fn additional_discussion_passes_converge_without_ignoring_new_candidates() {
     let h = Harness::new();
     let issues: Vec<_> = (1..=5)
-        .map(|i| json!({
-            "number": i,
-            "html_url": format!("https://github.com/TrainLCD/StationAPI/issues/{i}"),
-            "title": format!("関連課題 {i}"),
-            "body": format!("同種の駅名課題 {i}"),
-            "state": "open",
-            "updated_at": "2026-11-12T00:00:00Z",
-            "comments": 0
-        }))
+        .map(|i| {
+            json!({
+                "number": i,
+                "html_url": format!("https://github.com/TrainLCD/StationAPI/issues/{i}"),
+                "title": format!("関連課題 {i}"),
+                "body": format!("同種の駅名課題 {i}"),
+                "state": "open",
+                "updated_at": "2026-11-12T00:00:00Z",
+                "comments": 0
+            })
+        })
         .collect();
-    fs::write(h.dir.path().join("issues.json"), serde_json::to_vec(&issues).unwrap()).unwrap();
+    fs::write(
+        h.dir.path().join("issues.json"),
+        serde_json::to_vec(&issues).unwrap(),
+    )
+    .unwrap();
     let output = h.run(true, "discussion-chain");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(), "6");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "6"
+    );
     assert_eq!(h.count(), 5);
     assert!(read_state(&h, "processed.json").get("google:r1").is_some());
     assert!(h.run(true, "discussion-chain").status.success());
-    assert_eq!(fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(), "6");
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "6"
+    );
 }
 
 #[test]
