@@ -1,0 +1,60 @@
+name: Verify saved analysis recovery without AI
+on:
+  push:
+    branches: [verify/review-recovery]
+    paths: [.github/workflows/verify-recovery.yml]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: review-triage
+  cancel-in-progress: false
+jobs:
+  recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Restore successful analysis artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          mkdir state
+          gh api repos/TrainLCD/ReviewTriage/actions/artifacts/14129012621/zip > "$RUNNER_TEMP/state.zip"
+          unzip -q "$RUNNER_TEMP/state.zip" -d state
+          mkdir -p "$RUNNER_TEMP/no-ai"
+          printf '#!/bin/sh\necho blocked >> "%s/codex-invocations"\nexit 97\n' "$RUNNER_TEMP" > "$RUNNER_TEMP/no-ai/codex"
+          chmod +x "$RUNNER_TEMP/no-ai/codex"
+          echo "$RUNNER_TEMP/no-ai" >> "$GITHUB_PATH"
+      - name: Build
+        run: cargo build --release --locked
+      - name: Recover definite reviews with zero AI calls
+        env:
+          GH_TOKEN: ${{ secrets.REVIEW_TRIAGE_GITHUB_TOKEN }}
+        run: |
+          set +e
+          python3 scripts/run_triage.py "$RUNNER_TEMP/recovery.log" state/progress.json target/release/trainlcd-review-triage run --input state/reviews.json --state-dir state --cached-only --apply
+          result=$?
+          echo "$result" > state/recovery-exit-code.txt
+          test ! -e "$RUNNER_TEMP/codex-invocations" || exit 97
+          python3 - <<'PY'
+          import json, pathlib
+          root=pathlib.Path("state")
+          report=json.loads((root/"report.json").read_text())
+          processed=json.loads((root/"processed.json").read_text())
+          print(json.dumps({"eligible":report.get("review_count"),"reused":report.get("reused_review_count"),"processed_total":len(processed),"created":len(report.get("created_issues",[])),"pending_without_AI":report.get("failed_review_count"),"AI_calls":0}))
+          assert report.get("reused_review_count",0) > 0, "No definite results recovered"
+          assert len(processed) > 9, "No additional definite reviews committed"
+          PY
+      - name: Save recovery state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-triage-state
+          path: state/
+          retention-days: 90
