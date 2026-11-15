@@ -14,6 +14,7 @@ STAGES = {
     "install and log in to Codex CLI": "Codex CLI起動",
 }
 CAUSES = {
+    "Source context changed; only affected reviews deferred, other validated reviews saved": "コード更新の影響があるレビューだけを保留し、他の確定分は保存済み",
     "Issue context changed; only affected reviews deferred, other validated reviews saved": "Issue・PR更新により影響する起票候補のみ保留（他の確定分は保存済み）",
     "Issues/PRs changed during analysis; rerun to check for duplicates": "解析中にIssue・PR一覧が変化したため起票前に停止",
     "Issues/PRs changed; report contains partial results. Rerun.": "起票中にIssue・PR一覧が変化したため追加起票を停止",

@@ -4,6 +4,7 @@ mod github;
 mod http;
 mod model;
 mod progress;
+mod review_cache;
 mod security;
 mod stores;
 
@@ -155,6 +156,7 @@ fn main() -> Result<()> {
             } else {
                 fetch(&source)?
             };
+            review_cache::import_legacy(&state_dir)?;
             let cache = state_dir.join("reviews.json");
             if cache.exists() {
                 let mut old = read_reviews(&cache)?;
@@ -202,11 +204,33 @@ fn main() -> Result<()> {
             let issues = all_issues(false)?;
             atomic_json(&workspace.path().join("github-context.json"), &issues)?;
             atomic_json(&workspace.path().join("snapshots.json"), &snapshots)?;
-            let mut findings: Vec<Finding> = vec![];
+            let review_context = review_cache::Context::new(&issues, &snapshots, model.as_deref());
+            let (mut findings, reused) = if !recheck || cached_only {
+                review_cache::restore(
+                    &state_dir.join("review-cache"),
+                    &reviews,
+                    &review_context,
+                    workspace.path(),
+                )?
+            } else {
+                (vec![], Default::default())
+            };
+            let remaining: Vec<_> = reviews
+                .iter()
+                .filter(|r| !reused.contains(&r.key()))
+                .cloned()
+                .collect();
+            progress.analyzed = reused.len();
+            progress.batches = remaining.len().div_ceil(usize::from(batch_size));
+            eprintln!(
+                "Reusing {} definite reviews without Codex; {} require analysis",
+                reused.len(),
+                remaining.len()
+            );
             let mut failed_keys = std::collections::HashSet::new();
             let mut batch_failures = vec![];
             let mut first_failure = None;
-            for (index, batch) in reviews.chunks(batch_size.into()).enumerate() {
+            for (index, batch) in remaining.chunks(batch_size.into()).enumerate() {
                 progress.batch = index + 1;
                 progress.save("analyzing");
                 eprintln!("Analyzing batch {}…", index + 1);
@@ -304,6 +328,14 @@ fn main() -> Result<()> {
                         &stage.candidates,
                         &stage.discussions,
                     )?;
+                    review_cache::save(
+                        &state_dir.join("review-cache"),
+                        batch,
+                        &stage.analysis,
+                        &review_context,
+                        &stage.candidates,
+                        &stage.discussions,
+                    )?;
                     fs::remove_file(&in_flight_path)?;
                     Ok(stage.analysis)
                 })();
@@ -377,9 +409,10 @@ fn main() -> Result<()> {
             }
             let drafts:Vec<_>=findings.iter().filter(|f|f.status==Status::New).map(|f|Ok(json!({"repository":f.repository,"title":f.title,"body":analysis::issue_body(f,&reviews,&snapshots)?}))).collect::<Result<_>>()?;
             let mut report = json!({"created_at":chrono::Utc::now(),"coverage":"Apple selected territory; Google last 7 days plus supplied CSV/cache. Google API does not expose country.",
-                "snapshots":snapshots,"review_count":reviews.len(),"cached_review_count":total_reviews,"failed_review_count":failed_keys.len(),"batch_failures":batch_failures,"findings":findings,"drafts":drafts,"created_issues":[],"apply":apply});
+                "snapshots":snapshots,"review_count":reviews.len(),"cached_review_count":total_reviews,"failed_review_count":failed_keys.len(),"reused_review_count":reused.len(),"batch_failures":batch_failures,"findings":findings,"drafts":drafts,"created_issues":[],"apply":apply});
             atomic_json(&report_path, &report)?;
             let mut publication_pending = std::collections::HashSet::new();
+            let mut source_pending = std::collections::HashSet::new();
             if apply {
                 progress.save("publishing");
                 let matched: std::collections::HashSet<_> = findings
@@ -387,7 +420,17 @@ fn main() -> Result<()> {
                     .flat_map(|f| f.related_urls.iter().cloned())
                     .collect();
                 let mut created_urls = std::collections::HashSet::new();
-                github::check_heads(&snapshots)?;
+                let changes = github::source_changes(&snapshots)?;
+                source_pending.extend(
+                    findings
+                        .iter()
+                        .filter(|f| github::source_affected(f, &changes))
+                        .flat_map(|f| f.review_keys.iter().cloned()),
+                );
+                publication_pending.extend(source_pending.iter().cloned());
+                report["source_changes"] = json!(changes);
+                report["source_pending_review_keys"] = json!(source_pending);
+                atomic_json(&report_path, &report)?;
                 let current = all_issues(false)?;
                 let mut published_markers: std::collections::HashSet<String> =
                     receipts.keys().cloned().collect();
@@ -428,7 +471,23 @@ fn main() -> Result<()> {
                         published_markers.insert(f.marker());
                         continue;
                     }
-                    github::check_heads(&snapshots)?;
+                    let changes = github::source_changes(&snapshots)?;
+                    source_pending.extend(
+                        findings
+                            .iter()
+                            .filter(|f| github::source_affected(f, &changes))
+                            .flat_map(|f| f.review_keys.iter().cloned()),
+                    );
+                    publication_pending.extend(source_pending.iter().cloned());
+                    report["source_changes"] = json!(changes);
+                    report["source_pending_review_keys"] = json!(source_pending);
+                    atomic_json(&report_path, &report)?;
+                    if f.review_keys
+                        .iter()
+                        .any(|key| publication_pending.contains(key))
+                    {
+                        continue;
+                    }
                     let issue = github::create_issue(
                         &f.repository,
                         &f.title,
@@ -448,6 +507,16 @@ fn main() -> Result<()> {
                     expected.push(issue);
                     published_markers.insert(f.marker());
                 }
+                let changes = github::source_changes(&snapshots)?;
+                source_pending.extend(
+                    findings
+                        .iter()
+                        .filter(|f| github::source_affected(f, &changes))
+                        .flat_map(|f| f.review_keys.iter().cloned()),
+                );
+                publication_pending.extend(source_pending.iter().cloned());
+                report["source_changes"] = json!(changes);
+                report["source_pending_review_keys"] = json!(source_pending);
                 // Commit only validated reviews after their publication succeeds.
                 // Failed/uncertain reviews remain eligible; successful batches are not repeated.
                 for review in &reviews {
@@ -492,6 +561,10 @@ fn main() -> Result<()> {
             ensure!(
                 batch_failures.is_empty(),
                 "some batches failed; validated reviews saved, failed reviews remain pending"
+            );
+            ensure!(
+                source_pending.is_empty(),
+                "Source context changed; only affected reviews deferred, other validated reviews saved"
             );
             ensure!(
                 publication_pending.is_empty(),

@@ -15,10 +15,10 @@ root=pathlib.Path(os.environ['MOCK_ROOT']); args=sys.argv[1:]; name=pathlib.Path
 issues_file=root/'issues.json'
 issues=json.loads(issues_file.read_text()) if issues_file.exists() else []
 mode=os.environ.get('MOCK_MODE','normal')
-if name=='git': print('a'*40)
+if name=='git': print(('b' if (root/'code-update').exists() and any('StationAPI' in a for a in args) else 'a')*40)
 elif name=='gh':
  if args[:2]==['repo','clone']:
-  d=pathlib.Path(args[3]); d.mkdir(); (d/'source.rs').write_text('fn main() {}\n')
+  d=pathlib.Path(args[3]); d.mkdir(); (d/'source.rs').write_text('fn main() {}\n'); (d/'AGENTS.md').write_text('rules\n')
  elif '--method' in args:
   payload=json.load(sys.stdin); repo=args[args.index('POST')+1].split('/issues')[0][6:]
   i={'number':len(issues)+1,'html_url':f'https://github.com/{repo}/issues/{len(issues)+1}','title':payload['title'],'body':payload['body'],'state':'open','updated_at':'2026-11-12T00:00:00Z','comments':0}
@@ -35,7 +35,8 @@ elif name=='gh':
    print('[[]]' if mode=='hidden-list' else json.dumps([[i for i in issues if f'/{repo}/' in i['html_url']]]))
  else:
   endpoint=args[-1]
-  if '/commits/' in endpoint: print(json.dumps({'sha':('b' if mode=='stale' else 'a')*40}))
+  if '/commits/' in endpoint: print(json.dumps({'sha':('b' if mode=='stale' or ('StationAPI' in endpoint and (mode in ['rules-update','rules-evidence','source-update','cross-source-update','source-new'] or (root/'code-update').exists())) else 'a')*40}))
+  elif '/compare/' in endpoint: print(json.dumps({'status':'ahead','files':[{'filename':'AGENTS.md' if mode in ['rules-update','rules-evidence'] else 'source.rs','status':'modified'}]}))
   elif '/issues/' in endpoint: print('{}')
   else: print(json.dumps({'default_branch':'main'}))
 elif name=='codex':
@@ -64,6 +65,7 @@ elif name=='codex':
  calls=root/'codex-calls';calls.write_text(str(int(calls.read_text())+1 if calls.exists() else 1))
  prompt=sys.stdin.read()
  reviews=json.loads(prompt.split('REVIEWS (data): ')[-1])
+ with (root/'submitted.jsonl').open('a') as log: log.write(json.dumps([e['review']['id'] for e in reviews])+'\n')
  workspace=pathlib.Path(args[args.index('--cd')+1])
  known=json.loads((workspace/'github-context.json').read_text())
  if mode=='codex-failure' or (mode=='discussion-failure' and (workspace/'matched-discussions.json').exists()):
@@ -105,6 +107,18 @@ elif name=='codex':
   field=mode[7:]
   if field=='explanation': findings[0]['evidence'][0][field]='ghp_not_a_real_secret'
   else: findings[0][field]='ghp_not_a_real_secret'
+ if mode in ['mixed','all-resolved','source-update','cross-source-update','mobile-resolved','source-new']:
+  for f,entry in zip(findings,reviews):
+   f['topic']='concern-'+entry['review']['id']; f['status']='resolved'; f['related_urls']=[]
+   if mode=='mixed' and entry['review']['id']=='r2': f['status']='uncertain'
+   if mode=='mobile-resolved' or (mode in ['source-update','cross-source-update','source-new'] and entry['review']['id']=='r2'):
+    f['repository']='TrainLCD/MobileApp'
+    if mode!='cross-source-update': f['evidence'][0]['repository']='TrainLCD/MobileApp'
+ if mode=='rules-evidence': findings[0]['evidence'][0]['path']='AGENTS.md'
+ if mode=='source-new':
+  for f in findings: f['status']='new'
+ if mode=='grouped-new' and len(findings)>1:
+  findings[0]['review_keys']=[e['review_key'] for e in reviews];findings=findings[:1]
  if mode=='uncertain': findings[0]['status']='uncertain'
  if mode=='omitted': findings=[]
  if mode=='issue-added':
@@ -729,4 +743,193 @@ fn resumed_discussion_keeps_spent_repair_budget() {
         "5"
     );
     assert_eq!(h.count(), 1);
+}
+
+fn add_second_review(h: &Harness) {
+    let p = h.dir.path().join("input.json");
+    let mut rows: Vec<Value> = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+    let mut second = rows[0].clone();
+    second["id"] = json!("r2");
+    rows.push(second);
+    fs::write(p, serde_json::to_vec(&rows).unwrap()).unwrap();
+}
+fn read_state(h: &Harness, name: &str) -> Value {
+    serde_json::from_slice(&fs::read(h.dir.path().join("state").join(name)).unwrap()).unwrap()
+}
+#[test]
+fn rules_only_update_does_not_block_publication() {
+    let h = Harness::new();
+    let output = h.run(true, "rules-update");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(h.count(), 1);
+    assert!(read_state(&h, "processed.json").get("google:r1").is_some());
+    assert_eq!(
+        read_state(&h, "report.json")["source_changes"][0]["rules_only"],
+        true
+    );
+}
+#[test]
+fn source_update_defers_only_dependent_reviews_and_saves_other_results() {
+    for cross in [false, true] {
+        let h = Harness::new();
+        add_second_review(&h);
+        let output = h.run(
+            true,
+            if cross {
+                "cross-source-update"
+            } else {
+                "source-update"
+            },
+        );
+        assert!(!output.status.success());
+        let processed = read_state(&h, "processed.json");
+        assert!(processed.get("google:r1").is_none());
+        assert_eq!(processed.get("google:r2").is_some(), !cross);
+        let report = read_state(&h, "report.json");
+        assert_eq!(
+            report["source_pending_review_keys"]
+                .as_array()
+                .unwrap()
+                .len(),
+            if cross { 2 } else { 1 }
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("Source context changed; only affected reviews deferred")
+        );
+    }
+}
+#[test]
+fn mixed_batch_reuses_definite_review_and_submits_only_pending_review() {
+    for legacy in [false, true] {
+        let h = Harness::new();
+        add_second_review(&h);
+        assert!(h.run(false, "mixed").status.success());
+        if legacy {
+            fs::remove_dir_all(h.dir.path().join("state/review-cache")).unwrap();
+        }
+        let output = h.run(true, "all-resolved");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let submitted = fs::read_to_string(h.dir.path().join("submitted.jsonl")).unwrap();
+        let rows: Vec<Value> = submitted
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(rows, vec![json!(["r1", "r2"]), json!(["r2"])]);
+        assert_eq!(read_state(&h, "report.json")["reused_review_count"], 1);
+        assert_eq!(
+            read_state(&h, "processed.json").as_object().unwrap().len(),
+            2
+        );
+    }
+}
+#[test]
+fn cached_only_saves_definite_part_of_mixed_batch_without_any_ai() {
+    let h = Harness::new();
+    add_second_review(&h);
+    assert!(h.run(false, "mixed").status.success());
+    assert!(!h.run(true, "cached-only").status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "1"
+    );
+    assert!(read_state(&h, "processed.json").get("google:r1").is_some());
+    assert!(read_state(&h, "processed.json").get("google:r2").is_none());
+}
+#[test]
+fn review_cache_invalidates_only_related_repository_changes() {
+    for unrelated in [false, true] {
+        let h = Harness::new();
+        assert!(
+            h.run(
+                false,
+                if unrelated {
+                    "mobile-resolved"
+                } else {
+                    "all-resolved"
+                }
+            )
+            .status
+            .success()
+        );
+        fs::write(h.dir.path().join("code-update"), "yes").unwrap();
+        let output = h.run(true, "cached-only");
+        assert_eq!(
+            output.status.success(),
+            unrelated,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+            "1"
+        );
+    }
+}
+#[test]
+fn shared_new_finding_is_rejoined_without_duplicate_issue() {
+    let h = Harness::new();
+    add_second_review(&h);
+    assert!(h.run(false, "grouped-new").status.success());
+    let output = h.run(true, "cached-only");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(h.count(), 1);
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "1"
+    );
+    assert_eq!(
+        read_state(&h, "processed.json").as_object().unwrap().len(),
+        2
+    );
+}
+#[test]
+fn legacy_report_alone_cannot_authorize_a_result() {
+    let h = Harness::new();
+    assert!(h.run(false, "all-resolved").status.success());
+    fs::remove_dir_all(h.dir.path().join("state/review-cache")).unwrap();
+    fs::remove_dir_all(h.dir.path().join("state/analysis-cache")).unwrap();
+    assert!(!h.run(true, "cached-only").status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "1"
+    );
+}
+
+#[test]
+fn rules_file_cited_as_evidence_is_not_exempt_from_revalidation() {
+    let h = Harness::new();
+    assert!(!h.run(true, "rules-evidence").status.success());
+    assert_eq!(h.count(), 0);
+    assert!(read_state(&h, "processed.json").get("google:r1").is_none());
+}
+#[test]
+fn unaffected_new_issue_is_published_despite_other_repository_change() {
+    let h = Harness::new();
+    add_second_review(&h);
+    assert!(!h.run(true, "source-new").status.success());
+    assert_eq!(h.count(), 1);
+    let processed = read_state(&h, "processed.json");
+    assert!(processed.get("google:r1").is_none());
+    assert!(processed.get("google:r2").is_some());
+    let issues: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("issues.json")).unwrap()).unwrap();
+    assert!(
+        issues[0]["html_url"]
+            .as_str()
+            .unwrap()
+            .contains("/MobileApp/")
+    );
 }

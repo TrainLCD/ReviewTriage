@@ -14,7 +14,8 @@ class DiagnosticsTests(unittest.TestCase):
     def test_context_drift_is_identified_without_raw_output(self):
         for error in ("Issues/PRs changed during analysis; rerun to check for duplicates",
                       "TrainLCD/StationAPI changed during analysis; rerun before publishing",
-                      "Issue context changed; only affected reviews deferred, other validated reviews saved"):
+                      "Issue context changed; only affected reviews deferred, other validated reviews saved",
+                      "Source context changed; only affected reviews deferred, other validated reviews saved"):
             self.assertNotIn("許可済み診断項目に該当しない", diagnostics.summarize("Error: " + error))
 
     def test_partial_failure_retains_allowlisted_failure_reason(self):
