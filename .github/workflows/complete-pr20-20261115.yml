@@ -28,6 +28,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           STATE_RUN_ID: '43710010035'
+          STATE_WORKFLOW: complete-pr20-20261115.yml
+          STATE_EVENT: push
         run: |
           set -euo pipefail
           if [[ "$GITHUB_RUN_ATTEMPT" != 1 ]]; then

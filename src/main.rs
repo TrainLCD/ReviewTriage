@@ -297,7 +297,9 @@ fn main() -> Result<()> {
                     atomic_json(&in_flight_path, &stage)?;
                     while !session.candidate_urls.is_subset(&stage.inspected) {
                         progress.save("discussions");
-                        ensure!(stage.passes < 3, "discussion candidates did not converge");
+                        // Additional candidate Issues may be discovered one at a time.
+                        // Keep the bound finite; never accept an uninspected match.
+                        ensure!(stage.passes < 6, "discussion candidates did not converge");
                         let details = github::reference_details(&issues, &session.candidate_urls)?;
                         let inspected = session.candidate_urls.clone();
                         atomic_json(&workspace.path().join("matched-discussions.json"), &details)?;
@@ -406,8 +408,12 @@ fn main() -> Result<()> {
             }
             atomic_json(&state_dir.join("failed-batches.json"), &batch_failures)?;
             let drafts:Vec<_>=findings.iter().filter(|f|f.status==Status::New).map(|f|Ok(json!({"repository":f.repository,"title":f.title,"body":analysis::issue_body(f,&reviews,&snapshots)?}))).collect::<Result<_>>()?;
+            let review_fingerprints: std::collections::BTreeMap<_, _> = reviews
+                .iter()
+                .map(|review| (review.key(), review.fingerprint()))
+                .collect();
             let mut report = json!({"created_at":chrono::Utc::now(),"coverage":"Apple selected territory; Google last 7 days plus supplied CSV/cache. Google API does not expose country.",
-                "snapshots":snapshots,"review_count":reviews.len(),"cached_review_count":total_reviews,"failed_review_count":failed_keys.len(),"reused_review_count":reused.len(),"cache_rejections":cache_rejections,"batch_failures":batch_failures,"findings":findings,"drafts":drafts,"created_issues":[],"apply":apply});
+                "snapshots":snapshots,"review_fingerprints":review_fingerprints,"review_count":reviews.len(),"cached_review_count":total_reviews,"failed_review_count":failed_keys.len(),"reused_review_count":reused.len(),"cache_rejections":cache_rejections,"batch_failures":batch_failures,"findings":findings,"drafts":drafts,"created_issues":[],"apply":apply});
             atomic_json(&report_path, &report)?;
             // Always replace a previous run's report, including an all-failed
             // cached-only run, so stale success counts cannot masquerade as results.
@@ -523,6 +529,14 @@ fn main() -> Result<()> {
                 publication_pending.extend(source_pending.iter().cloned());
                 report["source_changes"] = json!(changes);
                 report["source_pending_review_keys"] = json!(source_pending);
+                // A shared new finding may have been skipped because only one
+                // review key was source/issue-pending. Keep *all* linked reviews
+                // pending until that finding has actually been published.
+                for f in findings.iter().filter(|f| f.status == Status::New) {
+                    if !published_markers.contains(&f.marker()) {
+                        publication_pending.extend(f.review_keys.iter().cloned());
+                    }
+                }
                 // Commit only validated reviews after their publication succeeds.
                 // Failed/uncertain reviews remain eligible; successful batches are not repeated.
                 for review in &reviews {

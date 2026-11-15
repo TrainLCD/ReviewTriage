@@ -35,7 +35,7 @@ elif name=='gh':
    print('[[]]' if mode=='hidden-list' else json.dumps([[i for i in issues if f'/{repo}/' in i['html_url']]]))
  else:
   endpoint=args[-1]
-  if '/commits/' in endpoint: print(json.dumps({'sha':('b' if mode=='stale' or ('StationAPI' in endpoint and (mode in ['rules-update','rules-evidence','source-update','cross-source-update','source-new'] or (root/'code-update').exists())) else 'a')*40}))
+  if '/commits/' in endpoint: print(json.dumps({'sha':('b' if mode=='stale' or ('StationAPI' in endpoint and (mode in ['rules-update','rules-evidence','source-update','cross-source-update','source-new','shared-source-update'] or (root/'code-update').exists())) else 'a')*40}))
   elif '/compare/' in endpoint: print(json.dumps({'status':'ahead','files':[{'filename':'AGENTS.md' if mode in ['rules-update','rules-evidence'] else 'source.rs','status':'modified'}]}))
   elif '/issues/' in endpoint: print('{}')
   else: print(json.dumps({'default_branch':'main'}))
@@ -123,6 +123,20 @@ elif name=='codex':
   for f in findings: f['status']='new'
  if mode=='grouped-new' and len(findings)>1:
   findings[0]['review_keys']=[e['review_key'] for e in reviews];findings=findings[:1]
+ if mode=='shared-source-update' and len(findings)>1:
+  # r1 has a StationAPI-only resolved concern and shares an unpublished
+  # MobileApp new concern with r2. Only r1 is source-pending.
+  findings[0]['topic']='station-specific'
+  findings[0]['status']='resolved'
+  findings[0]['related_urls']=[]
+  findings[1]['topic']='shared-mobile-issue'
+  findings[1]['repository']='TrainLCD/MobileApp'
+  findings[1]['evidence'][0]['repository']='TrainLCD/MobileApp'
+  findings[1]['review_keys']=[e['review_key'] for e in reviews]
+ if mode=='discussion-chain':
+  n=int(calls.read_text())
+  findings[0]['status']='existing'
+  findings[0]['related_urls']=[known[min(n-1,4)]['url']]
  if mode=='uncertain': findings[0]['status']='uncertain'
  if mode=='omitted': findings=[]
  if mode=='issue-added':
@@ -714,6 +728,30 @@ fn issue_addition_defers_new_candidate_but_saves_unaffected_reviews() {
 }
 
 #[test]
+fn additional_discussion_passes_converge_without_ignoring_new_candidates() {
+    let h = Harness::new();
+    let issues: Vec<_> = (1..=5)
+        .map(|i| json!({
+            "number": i,
+            "html_url": format!("https://github.com/TrainLCD/StationAPI/issues/{i}"),
+            "title": format!("関連課題 {i}"),
+            "body": format!("同種の駅名課題 {i}"),
+            "state": "open",
+            "updated_at": "2026-11-12T00:00:00Z",
+            "comments": 0
+        }))
+        .collect();
+    fs::write(h.dir.path().join("issues.json"), serde_json::to_vec(&issues).unwrap()).unwrap();
+    let output = h.run(true, "discussion-chain");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(), "6");
+    assert_eq!(h.count(), 5);
+    assert!(read_state(&h, "processed.json").get("google:r1").is_some());
+    assert!(h.run(true, "discussion-chain").status.success());
+    assert_eq!(fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(), "6");
+}
+
+#[test]
 fn failed_discussion_resumes_without_repeating_initial_analysis() {
     for changed in [false, true] {
         let h = Harness::new();
@@ -831,6 +869,71 @@ fn source_update_defers_only_dependent_reviews_and_saves_other_results() {
         );
     }
 }
+#[test]
+fn shared_unpublished_finding_keeps_every_linked_review_pending() {
+    let h = Harness::new();
+    add_second_review(&h);
+    let output = h.run(true, "shared-source-update");
+    assert!(
+        !output.status.success(),
+        "source changes must keep both reviews pending"
+    );
+    assert_eq!(h.count(), 0, "the shared finding must not be published");
+    let processed = read_state(&h, "processed.json");
+    assert!(processed.get("google:r1").is_none());
+    assert!(processed.get("google:r2").is_none());
+    let report = read_state(&h, "report.json");
+    assert_eq!(report["source_pending_review_keys"], json!(["google:r1"]));
+    assert_eq!(
+        report["publication_pending_review_keys"],
+        json!(["google:r1", "google:r2"])
+    );
+}
+
+#[test]
+fn edited_legacy_review_cannot_reuse_an_old_analysis() {
+    for missing_fingerprints in [false, true] {
+        let h = Harness::new();
+        assert!(h.run(false, "all-resolved").status.success());
+        fs::remove_dir_all(h.dir.path().join("state/review-cache")).unwrap();
+        // Keep the completed legacy payload available to import_legacy, but
+        // prevent the independent, valid batch-checkpoint fallback from
+        // masking the migration-specific regression.
+        let cache_dir = h.dir.path().join("state/analysis-cache");
+        let checkpoint = fs::read_dir(&cache_dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::rename(checkpoint, cache_dir.join("legacy-only.json")).unwrap();
+        if missing_fingerprints {
+            let path = h.dir.path().join("state/report.json");
+            let mut report: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            report
+                .as_object_mut()
+                .unwrap()
+                .remove("review_fingerprints");
+            fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+        } else {
+            let path = h.dir.path().join("state/reviews.json");
+            let mut reviews: Vec<Value> =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            reviews[0]["text"] = json!("解析後に編集された本文");
+            reviews[0]["updated_at"] = json!("2026-11-12T00:00:00Z");
+            fs::write(&path, serde_json::to_vec(&reviews).unwrap()).unwrap();
+        }
+        let output = h.run(true, "cached-only");
+        assert!(!output.status.success());
+        assert_eq!(h.count(), 0);
+        assert_eq!(read_state(&h, "report.json")["reused_review_count"], 0);
+        assert_eq!(
+            read_state(&h, "report.json")["cache_rejections"]["no_definite_record"],
+            1
+        );
+    }
+}
+
 #[test]
 fn mixed_batch_reuses_definite_review_and_submits_only_pending_review() {
     for legacy in [false, true] {
