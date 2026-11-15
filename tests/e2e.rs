@@ -316,7 +316,17 @@ fn uncertain_reviews_remain_pending_and_dry_run_does_not_mark_processed() {
     let h = Harness::new();
     assert!(h.run(false, "normal").status.success());
     assert!(!h.dir.path().join("state/processed.json").exists());
-    assert!(h.run(true, "uncertain").status.success());
+    assert!(!h.run(true, "uncertain").status.success());
+    assert_eq!(read_state(&h, "progress.json")["phase"], "partial");
+    assert_eq!(
+        read_state(&h, "report.json")["uncertain_review_keys"],
+        json!(["google:r1"])
+    );
+    assert_eq!(
+        read_state(&h, "report.json")["pending_review_keys"],
+        json!(["google:r1"])
+    );
+    assert_eq!(read_state(&h, "report.json")["processed_review_count"], 0);
     assert!(h.run(true, "normal").status.success());
     assert_eq!(h.count(), 1);
 }
@@ -363,7 +373,7 @@ fn successful_posts_survive_interruption_and_missing_list_entries() {
 fn recheck_uncertain_removes_previous_processed_fingerprint() {
     let h = Harness::new();
     assert!(h.run(true, "normal").status.success());
-    assert!(h.run(true, "recheck-uncertain").status.success());
+    assert!(!h.run(true, "recheck-uncertain").status.success());
     let processed: Value =
         serde_json::from_slice(&fs::read(h.dir.path().join("state/processed.json")).unwrap())
             .unwrap();
