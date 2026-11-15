@@ -316,7 +316,7 @@ fn uncertain_reviews_remain_pending_and_dry_run_does_not_mark_processed() {
     let h = Harness::new();
     assert!(h.run(false, "normal").status.success());
     assert!(!h.dir.path().join("state/processed.json").exists());
-    assert!(!h.run(true, "uncertain").status.success());
+    assert!(!h.run(true, "recheck-uncertain").status.success());
     assert_eq!(read_state(&h, "progress.json")["phase"], "partial");
     assert_eq!(
         read_state(&h, "report.json")["uncertain_review_keys"],

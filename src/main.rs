@@ -615,10 +615,12 @@ fn main() -> Result<()> {
                 publication_pending.is_empty(),
                 "Issue context changed; only affected reviews deferred, other validated reviews saved"
             );
-            ensure!(
-                uncertain_keys.is_empty(),
-                "Uncertain reviews need further evidence; documented findings and definitive state saved"
-            );
+            if apply {
+                ensure!(
+                    uncertain_keys.is_empty(),
+                    "Uncertain reviews need further evidence; documented findings and definitive state saved"
+                );
+            }
         }
     }
     Ok(())
