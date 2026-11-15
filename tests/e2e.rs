@@ -855,10 +855,7 @@ fn shared_unpublished_finding_keeps_every_linked_review_pending() {
     assert!(processed.get("google:r1").is_none());
     assert!(processed.get("google:r2").is_none());
     let report = read_state(&h, "report.json");
-    assert_eq!(
-        report["source_pending_review_keys"],
-        json!(["google:r1"])
-    );
+    assert_eq!(report["source_pending_review_keys"], json!(["google:r1"]));
     assert_eq!(
         report["publication_pending_review_keys"],
         json!(["google:r1", "google:r2"])
@@ -874,11 +871,15 @@ fn edited_legacy_review_cannot_reuse_an_old_analysis() {
         if missing_fingerprints {
             let path = h.dir.path().join("state/report.json");
             let mut report: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-            report.as_object_mut().unwrap().remove("review_fingerprints");
+            report
+                .as_object_mut()
+                .unwrap()
+                .remove("review_fingerprints");
             fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
         } else {
             let path = h.dir.path().join("state/reviews.json");
-            let mut reviews: Vec<Value> = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            let mut reviews: Vec<Value> =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
             reviews[0]["text"] = json!("解析後に編集された本文");
             reviews[0]["updated_at"] = json!("2026-11-12T00:00:00Z");
             fs::write(&path, serde_json::to_vec(&reviews).unwrap()).unwrap();
