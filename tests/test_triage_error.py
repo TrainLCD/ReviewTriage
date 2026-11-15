@@ -37,6 +37,22 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn("説明空欄=1件", message)
         self.assertNotIn("PRIVATE REVIEW", message)
 
+    def test_all_failed_batches_aggregate_instead_of_last_invalid_evidence(self):
+        events = [
+            {"type": "review_triage.batch_failed",
+             "failure_code": "invalid evidence line", "invalid_lines": 2, "empty_explanations": 0},
+            {"type": "review_triage.invalid_evidence",
+             "problems": [{"supplied_line": 999, "file_line_count": 1, "empty_explanation": False}]},
+            {"type": "review_triage.batch_failed",
+             "failure_code": "invalid evidence line", "invalid_lines": 1, "empty_explanations": 3,
+             "private_review": "PRIVATE REVIEW"},
+        ]
+        log = "\\n".join(map(json.dumps, events)) + "\\nError: invalid evidence line\\n"
+        result = diagnostics.summarize(log)
+        self.assertIn("行番号範囲外=3件", result)
+        self.assertIn("説明空欄=3件", result)
+        self.assertNotIn("PRIVATE REVIEW", result)
+
     def test_evidence_diagnostics_disambiguate_without_echoing_model_text(self):
         event = {"type": "review_triage.invalid_evidence", "problems": [
             {"supplied_line": 999, "file_line_count": 1, "empty_explanation": False},
