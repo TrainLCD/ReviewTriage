@@ -366,6 +366,16 @@ pub fn import_legacy(state: &Path) -> Result<()> {
     ) else {
         return Ok(());
     };
+    // An older report does not identify which review text its findings
+    // describe. reviews.json may have been replaced before a failed run
+    // could replace report.json, so matching store:id alone is unsafe.
+    // Only reports containing fingerprints captured with their findings
+    // can authorize a legacy migration.
+    let Ok(fingerprints) = serde_json::from_value::<HashMap<String, String>>(
+        report["review_fingerprints"].clone(),
+    ) else {
+        return Ok(());
+    };
     let (Ok(findings), Ok(snapshots)) = (
         serde_json::from_value::<Vec<Finding>>(report["findings"].clone()),
         serde_json::from_value::<Vec<github::Snapshot>>(report["snapshots"].clone()),
@@ -411,7 +421,9 @@ pub fn import_legacy(state: &Path) -> Result<()> {
             continue;
         };
         for review in &reviews {
-            if uncertain.contains(&review.key()) {
+            if fingerprints.get(&review.key()) != Some(&review.fingerprint())
+                || uncertain.contains(&review.key())
+            {
                 continue;
             }
             let path = root.join(format!("{}.json", crate::model::digest(&review.key())));
