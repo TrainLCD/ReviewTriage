@@ -29,7 +29,7 @@ elif name=='gh':
   print(json.dumps(i))
  elif '--paginate' in args:
   endpoint=args[-1]
-  if '/comments?' in endpoint: print('[[]]')
+  if '/comments?' in endpoint: print('[[{"body":"changed"}]]' if (root/'comment-change').exists() and '/issues/1/' in endpoint else '[[]]')
   else:
    repo=endpoint.split('/issues')[0][6:]
    print('[[]]' if mode=='hidden-list' else json.dumps([[i for i in issues if f'/{repo}/' in i['html_url']]]))
@@ -114,6 +114,8 @@ elif name=='codex':
    if mode=='mobile-resolved' or (mode in ['source-update','cross-source-update','source-new'] and entry['review']['id']=='r2'):
     f['repository']='TrainLCD/MobileApp'
     if mode!='cross-source-update': f['evidence'][0]['repository']='TrainLCD/MobileApp'
+ if mode=='linked':
+  for f,entry in zip(findings,reviews): f['topic']='concern-'+entry['review']['id'];f['status']='existing';f['related_urls']=[known[int(entry['review']['id'][1:])-1]['url']]
  if mode=='shared-resolved':
   for f,entry in zip(findings,reviews): f['status']='resolved';f['related_urls']=[];f['reason']='Confirmed '+entry['review']['id']
  if mode=='rules-evidence': findings[0]['evidence'][0]['path']='AGENTS.md'
@@ -840,6 +842,10 @@ fn cached_only_saves_definite_part_of_mixed_batch_without_any_ai() {
     assert!(h.run(false, "mixed").status.success());
     assert!(!h.run(true, "cached-only").status.success());
     assert_eq!(
+        read_state(&h, "report.json")["cache_rejections"]["no_definite_record"],
+        1
+    );
+    assert_eq!(
         fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
         "1"
     );
@@ -962,4 +968,34 @@ fn distinct_definite_findings_for_same_topic_are_all_reused() {
         read_state(&h, "processed.json").as_object().unwrap().len(),
         2
     );
+}
+
+#[test]
+fn discussion_change_invalidates_only_the_review_citing_it() {
+    let h = Harness::new();
+    assert!(h.run(true, "normal").status.success());
+    fs::remove_file(h.dir.path().join("state/processed.json")).unwrap();
+    let p = h.dir.path().join("issues.json");
+    let mut issues: Vec<Value> = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+    let mut second = issues[0].clone();
+    second["number"] = json!(2);
+    second["html_url"] = json!("https://github.com/TrainLCD/StationAPI/issues/2");
+    issues.push(second);
+    fs::write(p, serde_json::to_vec(&issues).unwrap()).unwrap();
+    add_second_review(&h);
+    assert!(h.run(false, "linked").status.success());
+    let calls = fs::read_to_string(h.dir.path().join("codex-calls")).unwrap();
+    fs::write(h.dir.path().join("comment-change"), "yes").unwrap();
+    assert!(!h.run(true, "cached-only").status.success());
+    assert_eq!(
+        calls,
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap()
+    );
+    assert_eq!(
+        read_state(&h, "report.json")["cache_rejections"]["discussion_changed"],
+        1
+    );
+    let processed = read_state(&h, "processed.json");
+    assert!(processed.get("google:r1").is_none());
+    assert!(processed.get("google:r2").is_some());
 }

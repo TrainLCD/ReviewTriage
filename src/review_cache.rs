@@ -95,18 +95,47 @@ pub fn save(
         for f in &mut findings {
             f.review_keys = vec![review.key()];
         }
+        // Existing/resolved/ignore results depend on their own cited discussions,
+        // not on candidates discovered for another review in the same batch.
+        // New drafts retain all inspected candidates for duplicate safety.
+        let review_candidates = if findings.iter().any(|f| f.status == Status::New) {
+            candidates.clone()
+        } else {
+            findings
+                .iter()
+                .flat_map(|f| f.related_urls.iter().cloned())
+                .collect()
+        };
+        let review_discussions: Vec<_> = discussions
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|d| {
+                d["url"]
+                    .as_str()
+                    .is_some_and(|url| review_candidates.contains(url))
+            })
+            .cloned()
+            .collect();
         crate::atomic_json(
             &path,
             &Record {
                 review: review.clone(),
                 context: context_id.clone(),
                 analysis: Analysis { findings },
-                candidates: candidates.clone(),
-                discussions_hash: digest(discussions)?,
+                candidates: review_candidates,
+                discussions_hash: digest(&review_discussions)?,
             },
         )?;
     }
     Ok(())
+}
+
+#[derive(Default)]
+pub struct Restored {
+    pub findings: Vec<Finding>,
+    pub keys: HashSet<String>,
+    pub rejections: std::collections::BTreeMap<String, usize>,
 }
 
 pub fn restore(
@@ -114,41 +143,50 @@ pub fn restore(
     reviews: &[Review],
     current: &Context,
     workspace: &Path,
-) -> Result<(Vec<Finding>, HashSet<String>)> {
+) -> Result<Restored> {
     let mut findings: Vec<Finding> = vec![];
     let mut restored = HashSet::new();
     let mut contexts: HashMap<String, (Context, Vec<github::SourceChange>)> = HashMap::new();
     let mut discussion_hashes = HashMap::new();
+    let mut rejections = std::collections::BTreeMap::new();
+    macro_rules! reject {
+        ($reason:literal) => {{
+            *rejections.entry($reason.to_owned()).or_insert(0usize) += 1;
+            continue;
+        }};
+    }
     for review in reviews {
         let path = root.join(format!("{}.json", crate::model::digest(&review.key())));
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => reject!("no_definite_record"),
             Err(e) => return Err(e.into()),
         };
         let record: Record = match serde_json::from_slice(&bytes) {
             Ok(r) => r,
-            Err(_) => continue,
+            Err(_) => reject!("invalid_record"),
         };
         if record.review != *review
             || record.context.len() != 64
             || !record.context.bytes().all(|b| b.is_ascii_hexdigit())
         {
-            continue;
+            reject!("review_or_reference_changed");
         }
         if !contexts.contains_key(&record.context) {
             let path = root
                 .join("contexts")
                 .join(format!("{}.json", record.context));
-            let Ok(bytes) = fs::read(path) else { continue };
+            let Ok(bytes) = fs::read(path) else {
+                reject!("missing_context")
+            };
             let Ok(old) = serde_json::from_slice::<Context>(&bytes) else {
-                continue;
+                reject!("invalid_context");
             };
             if digest(&old)? != record.context
                 || old.model != current.model
                 || old.validator != current.validator
             {
-                continue;
+                reject!("model_or_validator_changed");
             }
             let mut changes = vec![];
             for s in &old.snapshots {
@@ -171,7 +209,7 @@ pub fn restore(
                         .any(|n| n.repository == s.repository && n.branch == s.branch)
                 })
             {
-                continue;
+                reject!("snapshot_inventory_changed");
             }
             contexts.insert(record.context.clone(), (old, changes));
         }
@@ -182,7 +220,7 @@ pub fn restore(
             .iter()
             .any(|f| f.status == Status::Uncertain || github::source_affected(f, changes))
         {
-            continue;
+            reject!("uncertain_or_source_changed");
         }
         if old.legacy
             && record
@@ -191,7 +229,7 @@ pub fn restore(
                 .iter()
                 .any(|f| f.status == Status::New)
         {
-            continue;
+            reject!("legacy_new_draft");
         }
         // A new issue must still be checked against the entire issue inventory.
         // For other statuses only referenced issues/discussions affect the decision.
@@ -207,14 +245,14 @@ pub fn restore(
                 &HashSet::new(),
             )
         {
-            continue;
+            reject!("issue_inventory_changed");
         }
         if !record
             .candidates
             .iter()
             .all(|url| current.issues.iter().any(|i| &i.url == url))
         {
-            continue;
+            reject!("missing_candidate");
         }
         let before: Vec<_> = old
             .issues
@@ -230,7 +268,7 @@ pub fn restore(
             .collect();
         if !old.legacy && !github::same_issues(&before, &after, &record.candidates, &HashSet::new())
         {
-            continue;
+            reject!("referenced_issue_changed");
         }
         let mut urls: Vec<_> = record.candidates.iter().cloned().collect();
         urls.sort();
@@ -243,17 +281,19 @@ pub fn restore(
             )?)?;
             discussion_hashes.entry(urls).or_insert(digest(&details)?)
         };
-        if hash != &record.discussions_hash
-            || analysis::validate(
-                &record.analysis,
-                std::slice::from_ref(review),
-                &current.issues,
-                &[],
-                workspace,
-            )
-            .is_err()
+        if hash != &record.discussions_hash {
+            reject!("discussion_changed");
+        }
+        if analysis::validate(
+            &record.analysis,
+            std::slice::from_ref(review),
+            &current.issues,
+            &[],
+            workspace,
+        )
+        .is_err()
         {
-            continue;
+            reject!("validation_failed");
         }
         // Split records from the same multi-review finding must be rejoined;
         // incompatible NEW drafts for the same topic are reanalyzed, never overwritten.
@@ -278,7 +318,7 @@ pub fn restore(
             }
         }
         if !compatible {
-            continue;
+            reject!("conflicting_draft");
         }
         for f in record.analysis.findings {
             let mut normalized = f.clone();
@@ -299,7 +339,11 @@ pub fn restore(
         }
         restored.insert(review.key());
     }
-    Ok((findings, restored))
+    Ok(Restored {
+        findings,
+        keys: restored,
+        rejections,
+    })
 }
 
 /// Recover independent, definite results from the previous on-disk state BEFORE

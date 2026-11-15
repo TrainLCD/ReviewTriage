@@ -205,7 +205,11 @@ fn main() -> Result<()> {
             atomic_json(&workspace.path().join("github-context.json"), &issues)?;
             atomic_json(&workspace.path().join("snapshots.json"), &snapshots)?;
             let review_context = review_cache::Context::new(&issues, &snapshots, model.as_deref());
-            let (mut findings, reused) = if !recheck || cached_only {
+            let review_cache::Restored {
+                mut findings,
+                keys: reused,
+                rejections: cache_rejections,
+            } = if !recheck || cached_only {
                 review_cache::restore(
                     &state_dir.join("review-cache"),
                     &reviews,
@@ -213,7 +217,7 @@ fn main() -> Result<()> {
                     workspace.path(),
                 )?
             } else {
-                (vec![], Default::default())
+                Default::default()
             };
             let remaining: Vec<_> = reviews
                 .iter()
@@ -409,7 +413,7 @@ fn main() -> Result<()> {
             }
             let drafts:Vec<_>=findings.iter().filter(|f|f.status==Status::New).map(|f|Ok(json!({"repository":f.repository,"title":f.title,"body":analysis::issue_body(f,&reviews,&snapshots)?}))).collect::<Result<_>>()?;
             let mut report = json!({"created_at":chrono::Utc::now(),"coverage":"Apple selected territory; Google last 7 days plus supplied CSV/cache. Google API does not expose country.",
-                "snapshots":snapshots,"review_count":reviews.len(),"cached_review_count":total_reviews,"failed_review_count":failed_keys.len(),"reused_review_count":reused.len(),"batch_failures":batch_failures,"findings":findings,"drafts":drafts,"created_issues":[],"apply":apply});
+                "snapshots":snapshots,"review_count":reviews.len(),"cached_review_count":total_reviews,"failed_review_count":failed_keys.len(),"reused_review_count":reused.len(),"cache_rejections":cache_rejections,"batch_failures":batch_failures,"findings":findings,"drafts":drafts,"created_issues":[],"apply":apply});
             atomic_json(&report_path, &report)?;
             let mut publication_pending = std::collections::HashSet::new();
             let mut source_pending = std::collections::HashSet::new();
