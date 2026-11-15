@@ -184,7 +184,10 @@ fn main() -> Result<()> {
             if reviews.is_empty() {
                 atomic_json(
                     &report_path,
-                    &json!({"created_at":chrono::Utc::now(),"findings":[],"created_issues":[],"coverage":"Apple selected territory; Google last 7 days plus supplied CSV/cache"}),
+                    &json!({"created_at":chrono::Utc::now(),"findings":[],"created_issues":[],"coverage":"Apple selected territory; Google last 7 days plus supplied CSV/cache",
+                        "review_count":0,"cached_review_count":total_reviews,"processed_review_count":processed.len(),
+                        "failed_review_count":0,"uncertain_review_keys":[],"pending_review_keys":[],
+                        "publication_pending_review_keys":[]}),
                 )?;
                 eprintln!(
                     "No new or edited text reviews to analyze (use --recheck to reanalyze processed reviews)."
@@ -425,6 +428,13 @@ fn main() -> Result<()> {
             }
             let mut publication_pending = std::collections::HashSet::new();
             let mut source_pending = std::collections::HashSet::new();
+            // An evidence-limited judgment is not a completed review, even
+            // when every model call succeeded and no Issue needs publishing.
+            let uncertain_keys: std::collections::HashSet<_> = findings
+                .iter()
+                .filter(|f| f.status == Status::Uncertain)
+                .flat_map(|f| f.review_keys.iter().cloned())
+                .collect();
             if apply {
                 progress.save("publishing");
                 let matched: std::collections::HashSet<_> = findings
@@ -552,13 +562,25 @@ fn main() -> Result<()> {
                         processed.insert(key, review.fingerprint());
                     }
                 }
-                progress.pending = publication_pending.len();
+                progress.pending = publication_pending.union(&uncertain_keys).count();
                 progress.save("saving");
                 atomic_json(&processed_path, &processed)?;
             }
             let mut pending_keys: Vec<_> = publication_pending.iter().cloned().collect();
             pending_keys.sort();
             report["publication_pending_review_keys"] = json!(pending_keys);
+            let mut uncertain_review_keys: Vec<_> = uncertain_keys.iter().cloned().collect();
+            uncertain_review_keys.sort();
+            report["uncertain_review_keys"] = json!(uncertain_review_keys);
+            let mut pending_review_keys: std::collections::HashSet<_> = publication_pending
+                .union(&uncertain_keys)
+                .cloned()
+                .collect();
+            pending_review_keys.extend(failed_keys.iter().cloned());
+            let mut pending_review_keys: Vec<_> = pending_review_keys.into_iter().collect();
+            pending_review_keys.sort();
+            report["pending_review_keys"] = json!(pending_review_keys);
+            report["processed_review_count"] = json!(processed.len());
             atomic_json(&report_path, &report)?;
             eprintln!(
                 "{} actionable drafts; {} total findings. Report: {}{}",
@@ -572,7 +594,10 @@ fn main() -> Result<()> {
                 }
             );
             progress.save(
-                if batch_failures.is_empty() && publication_pending.is_empty() {
+                if batch_failures.is_empty()
+                    && publication_pending.is_empty()
+                    && uncertain_keys.is_empty()
+                {
                     "complete"
                 } else {
                     "partial"
@@ -590,6 +615,12 @@ fn main() -> Result<()> {
                 publication_pending.is_empty(),
                 "Issue context changed; only affected reviews deferred, other validated reviews saved"
             );
+            if apply {
+                ensure!(
+                    uncertain_keys.is_empty(),
+                    "Uncertain reviews need further evidence; documented findings and definitive state saved"
+                );
+            }
         }
     }
     Ok(())

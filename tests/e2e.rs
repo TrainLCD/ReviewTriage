@@ -316,7 +316,17 @@ fn uncertain_reviews_remain_pending_and_dry_run_does_not_mark_processed() {
     let h = Harness::new();
     assert!(h.run(false, "normal").status.success());
     assert!(!h.dir.path().join("state/processed.json").exists());
-    assert!(h.run(true, "uncertain").status.success());
+    assert!(!h.run(true, "recheck-uncertain").status.success());
+    assert_eq!(read_state(&h, "progress.json")["phase"], "partial");
+    assert_eq!(
+        read_state(&h, "report.json")["uncertain_review_keys"],
+        json!(["google:r1"])
+    );
+    assert_eq!(
+        read_state(&h, "report.json")["pending_review_keys"],
+        json!(["google:r1"])
+    );
+    assert_eq!(read_state(&h, "report.json")["processed_review_count"], 0);
     assert!(h.run(true, "normal").status.success());
     assert_eq!(h.count(), 1);
 }
@@ -363,7 +373,7 @@ fn successful_posts_survive_interruption_and_missing_list_entries() {
 fn recheck_uncertain_removes_previous_processed_fingerprint() {
     let h = Harness::new();
     assert!(h.run(true, "normal").status.success());
-    assert!(h.run(true, "recheck-uncertain").status.success());
+    assert!(!h.run(true, "recheck-uncertain").status.success());
     let processed: Value =
         serde_json::from_slice(&fs::read(h.dir.path().join("state/processed.json")).unwrap())
             .unwrap();
@@ -731,24 +741,40 @@ fn issue_addition_defers_new_candidate_but_saves_unaffected_reviews() {
 fn additional_discussion_passes_converge_without_ignoring_new_candidates() {
     let h = Harness::new();
     let issues: Vec<_> = (1..=5)
-        .map(|i| json!({
-            "number": i,
-            "html_url": format!("https://github.com/TrainLCD/StationAPI/issues/{i}"),
-            "title": format!("関連課題 {i}"),
-            "body": format!("同種の駅名課題 {i}"),
-            "state": "open",
-            "updated_at": "2026-11-12T00:00:00Z",
-            "comments": 0
-        }))
+        .map(|i| {
+            json!({
+                "number": i,
+                "html_url": format!("https://github.com/TrainLCD/StationAPI/issues/{i}"),
+                "title": format!("関連課題 {i}"),
+                "body": format!("同種の駅名課題 {i}"),
+                "state": "open",
+                "updated_at": "2026-11-12T00:00:00Z",
+                "comments": 0
+            })
+        })
         .collect();
-    fs::write(h.dir.path().join("issues.json"), serde_json::to_vec(&issues).unwrap()).unwrap();
+    fs::write(
+        h.dir.path().join("issues.json"),
+        serde_json::to_vec(&issues).unwrap(),
+    )
+    .unwrap();
     let output = h.run(true, "discussion-chain");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(), "6");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "6"
+    );
     assert_eq!(h.count(), 5);
     assert!(read_state(&h, "processed.json").get("google:r1").is_some());
     assert!(h.run(true, "discussion-chain").status.success());
-    assert_eq!(fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(), "6");
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "6"
+    );
 }
 
 #[test]
