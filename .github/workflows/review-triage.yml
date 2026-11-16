@@ -15,6 +15,29 @@ on:
         description: Optional completed recovery run ID (newer production state takes precedence)
         type: string
         default: ''
+      model:
+        description: Explicit model (quality comparison still required before production adoption)
+        type: choice
+        options:
+          - gpt-6-luna
+          - gpt-5.3-codex
+        default: gpt-6-luna
+      reasoning_effort:
+        description: Fixed reasoning effort
+        type: choice
+        options:
+          - low
+          - medium
+          - high
+        default: low
+      max_run_cost_usd:
+        description: Admission budget USD (not a hard cap on an active call)
+        type: string
+        default: '5'
+      max_model_calls:
+        description: Maximum Codex invocations including repair/discussion calls
+        type: string
+        default: '20'
       territory:
         description: App Store territory (ISO alpha-3)
         type: string
@@ -74,7 +97,7 @@ jobs:
           sudo apt-get install --yes ripgrep bubblewrap
       - name: Install tools and build
         run: |
-          npm install --global @openai/codex
+          npm install --global @openai/codex@0.169.0
           command -v gh
           command -v rg
           cargo build --release --locked
@@ -93,6 +116,10 @@ jobs:
           APPLY: ${{ inputs.apply }}
           RECHECK: ${{ inputs.recheck }}
           TERRITORY: ${{ inputs.territory }}
+          TRIAGE_MODEL: ${{ inputs.model }}
+          TRIAGE_EFFORT: ${{ inputs.reasoning_effort }}
+          TRIAGE_BUDGET: ${{ inputs.max_run_cost_usd }}
+          TRIAGE_CALLS: ${{ inputs.max_model_calls }}
         run: |
           set -euo pipefail
           for name in GH_TOKEN OPENAI_API_KEY ASC_ISSUER_ID ASC_KEY_ID ASC_PRIVATE_KEY GOOGLE_SERVICE_ACCOUNT_JSON; do
@@ -110,7 +137,7 @@ jobs:
           export ASC_PRIVATE_KEY_PATH="$credentials/apple.p8"
           export GOOGLE_APPLICATION_CREDENTIALS="$credentials/google.json"
           unset ASC_PRIVATE_KEY GOOGLE_SERVICE_ACCOUNT_JSON
-          args=(run --state-dir state --territory "$TERRITORY")
+          args=(run --state-dir state --territory "$TERRITORY" --model "$TRIAGE_MODEL" --reasoning-effort "$TRIAGE_EFFORT" --max-run-cost-usd "$TRIAGE_BUDGET" --max-model-calls "$TRIAGE_CALLS")
           [[ "$APPLY" != true ]] || args+=(--apply)
           [[ "$RECHECK" != true ]] || args+=(--recheck)
           # Keep raw model output private; show numeric progress and a 30-second heartbeat.

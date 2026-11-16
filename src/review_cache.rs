@@ -392,7 +392,7 @@ pub fn import_legacy(state: &Path) -> Result<()> {
     let context = Context {
         issues: vec![],
         snapshots,
-        model: None,
+        model: report["analysis_identity"].as_str().map(str::to_owned),
         validator: validator(),
         legacy: true,
     };

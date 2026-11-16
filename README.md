@@ -87,7 +87,7 @@ trainlcd-review-triage fetch --out reviews.json
 trainlcd-review-triage run --input reviews.json --apply
 
 # モデルと解析上限時間を指定（各バッチ、既定10レビュー）
-trainlcd-review-triage run --model YOUR_MODEL --batch-size 10 --timeout-seconds 900
+trainlcd-review-triage run --model gpt-6-luna --reasoning-effort low --max-run-cost-usd 5 --max-model-calls 20 --batch-size 10 --timeout-seconds 900
 ```
 
 既定の保存先は `.review-triage/`。`--state-dir` で変更可能。
@@ -172,3 +172,24 @@ Codexが正常終了しても、JSONイベントに成功したコマンド実�
 ### 復旧状態を通常実行へ引き継ぐ
 
 検証ブランチ等で保存した `review-triage-state` を引き継ぐときは、Actionsの `state_run_id` にその実行IDを指定する。同じリポジトリ内の完了済み実行を通常の候補に加え、完了時刻で最新の状態を選ぶ。新しい通常実行の状態が存在する場合はそちらが優先され、古い復旧状態への巻き戻しはしない。省略時は従来どおり通常ワークフローの履歴から選択する。復元時にreportを削除せず、旧形式の移行を行ってから今回のレポートに置き換える。
+
+
+## API費用の計測と呼び出し制限（#22の計測基盤）
+
+CLI/Actionsは `gpt-6-luna` / `low` を明示指定する。これは比較検証用の暫定設定であり、実レビューで品質を確認した採用モデルではない。`--model gpt-5.3-codex --reasoning-effort medium` 等との比較を行うまでは、本番起票には採用しない。後者は2026-11-16の公式モデルページでDeprecated表記のため、利用可能性の確認も必要。Actionsとsandbox CIのCodexは `@openai/codex@0.169.0` に固定する。
+
+- `--max-run-cost-usd 5` は**次のCodex呼び出しの開始を許可するための概算予算**。既知の累積概算額 + `--call-cost-reserve-usd`（既定$1）が予算を超えると、新しい呼び出しを行わない。
+- **実行中の呼び出しを$5で強制停止する保証はない**。`codex exec` は複数のAPIリクエストを内包し、usageがターン終了まで確定しない。予約額は最悪費用の保証ではなく、1回で予算を超えることもある。厳密な月額上限はプロバイダー側の制御が必要。月$100の支出制約と、このツールで測定した消費額を区別する。
+- `--max-model-calls 20` は修正・議論確認を含む**Codexプロセス起動数**を制限する。内部のAPIリクエスト数ではない。`--timeout-seconds` も引き続き適用する。非正数・NaN・無限大の金額、価格表にないモデルは開始前に拒否する。
+- Quota/429等の構造化エラー、usage欠落・不正・複数の曖昧な終了usage、タイムアウト・失敗で費用が不明になったときは後続呼び出しを停止する。CLIのprovider request/stream retryも0にする。エラー文中のレビュー本文・Secretsは集計しない。
+- `cost.json` は呼び出し前と終了時にatomic保存する。強制中断した呼び出しも無料扱いしない。次回実行前に前回分を `cost-history/` に保存する。**新規実行の予算はリセットされる**ため、再実行回数を含む月額管理には履歴とAPI Billingを使う。
+- `report.json` に `estimated_cost_usd` / `usage_by_model` / `codex_invocations` / `calls_per_review` / `cache_hit_rate` / `retries_by_reason` を保存し、`cost` に各呼び出しのバッチ・目的・経過時間・設定を記録する。calls_per_reviewの分母は今回の対象レビュー件数（キャッシュ再利用分を含む）。usage_by_modelは取得できたusageのみの合計であり、`usage_complete=false` の場合は全実績ではない。
+- 入力トークンにはキャッシュ入力を含む。出力には推論トークンを含むため二重加算しない。推論内訳が提供されなければ `null`。実効モデル/effortを保証するイベントがないため `observed_model` / `observed_effort` は `null` とし、指定値と区別する。概算は指定モデルに基づく。usage不明の実行合計は `null`、取得済み分だけの額は `known_cost_usd`。
+- 価格表 `2026-11-16-standard-conservative-v1` は標準処理・非リージョンのテキスト料金を基準とする。Lunaはリクエスト別文脈長・キャッシュ書込量がJSONLから不明なため、全未キャッシュ入力に長文脈かつ12時間キャッシュ書込料金相当の$0.50/100万、キャッシュ読取$0.02、出力$0.75を保守的に適用する。通常の短文脈入力$0.10・キャッシュ$0.01・出力$0.50より高めになる。gpt-5.3-codexは入力$1.75・キャッシュ$0.175・出力$14。Fast/地域加算・別途課金ツールはこの見積りに含まれない。実請求との突合は未実施であり、レポートも `unavailable` とする。
+- 予算停止でも確定済みの検証結果・起票済みレシート・復旧stateを保持し、未完了キーをレポートに残して非ゼロ終了する。モデル/effort変更は解析キャッシュキーを変えるが、処理済みレビューや起票済みレシートを削除しない。
+
+価格・仕様の確認日: 2026-11-16。参照: [料金](https://developers.openai.com/api/docs/pricing)、[Luna](https://developers.openai.com/api/docs/models/gpt-6-luna)、[GPT-5.3-Codex](https://developers.openai.com/api/docs/models/gpt-5.3-codex)、[JSONL usage](https://learn.chatgpt.com/docs/non-interactive-mode)。
+
+### 残る完了条件
+
+この変更だけでは#22を完了扱いにしない。実レビューの固定評価集合・人手正解、モデル間の品質/費用比較、重要ケースの段階昇格、決定論的な候補絞り込み、uncertainの差分再評価、実請求との照合、139件/$20の実証は未実施。APIキーなしのmock E2Eではこれらを実測したことにはならない。#21の実データ検証stateをこの変更のテスト用stateで上書きしない。

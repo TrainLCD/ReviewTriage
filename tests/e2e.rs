@@ -44,6 +44,7 @@ elif name=='codex':
  assert pathlib.Path(os.environ['XDG_CONFIG_HOME']).is_dir()
  codex_home=pathlib.Path(os.environ['CODEX_HOME'])
  assert codex_home == root/'original-codex'
+ assert '--model' in args and any(a.startswith('model_reasoning_effort=') for a in args)
  assert '--ignore-user-config' in args and '--ignore-rules' in args and '--json' in args
  store=next(a for a in args if a.startswith('cli_auth_credentials_store='))
  if mode=='keyring':
@@ -68,6 +69,8 @@ elif name=='codex':
  with (root/'submitted.jsonl').open('a') as log: log.write(json.dumps([e['review']['id'] for e in reviews])+'\n')
  workspace=pathlib.Path(args[args.index('--cd')+1])
  known=json.loads((workspace/'github-context.json').read_text())
+ if mode=='quota':
+  print(json.dumps({'type':'turn.failed','error':{'message':'Quota exceeded. Check your plan and billing details.'}}));sys.exit(42)
  if mode=='codex-failure' or (mode=='discussion-failure' and (workspace/'matched-discussions.json').exists()):
   print(json.dumps({'type':'turn.failed','error':{'message':'test provider failure'}}))
   sys.exit(42)
@@ -182,6 +185,7 @@ elif name=='codex':
    if mode=='multiple-evidence-once': assert '"evidence_index":1' in prompt
  if mode=='bad-evidence': findings[0]['evidence'][0]['path']='../github-context.json'
  if mode=='new-despite-marker': findings[0]['status']='new';findings[0]['related_urls']=[]
+ if mode!='missing-usage': print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1000,'cached_input_tokens':500,'output_tokens':100,'reasoning_output_tokens':50}}))
  pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps({'findings':findings}))
 "#;
         for name in ["gh", "git", "codex"] {
@@ -242,6 +246,18 @@ elif name=='codex':
             || mode == "shared-resolved"
             || mode == "prior-cross-source-update"
         {
+            c.args(["--batch-size", "1"]);
+        }
+        if mode == "effort-high" {
+            c.args(["--reasoning-effort", "high"]);
+        }
+        if mode == "call-budget" {
+            c.args(["--max-model-calls", "1", "--batch-size", "1"]);
+        }
+        if mode == "cost-budget" {
+            c.args(["--max-run-cost-usd", "0.5"]);
+        }
+        if mode == "quota" || mode == "missing-usage" {
             c.args(["--batch-size", "1"]);
         }
         if mode == "cached-only" {
@@ -1278,4 +1294,93 @@ fn all_cache_misses_replace_the_old_report_with_current_failure_counts() {
         fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
         "1"
     );
+}
+
+#[test]
+fn admission_budget_blocks_before_any_model_call() {
+    let h = Harness::new();
+    let result = h.run(true, "cost-budget");
+    assert!(!result.status.success());
+    assert!(!h.dir.path().join("codex-calls").exists());
+    assert_eq!(h.count(), 0);
+    let report: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap()).unwrap();
+    assert_eq!(report["codex_invocations"], 0);
+    assert_eq!(report["pending_review_keys"], json!(["google:r1"]));
+}
+
+#[test]
+fn unknown_usage_and_quota_stop_all_remaining_batches() {
+    for mode in ["missing-usage", "quota"] {
+        let h = Harness::new();
+        let mut reviews: Vec<Value> =
+            serde_json::from_slice(&fs::read(h.dir.path().join("input.json")).unwrap()).unwrap();
+        let mut second = reviews[0].clone();
+        second["id"] = json!("r2");
+        reviews.push(second);
+        fs::write(
+            h.dir.path().join("input.json"),
+            serde_json::to_vec(&reviews).unwrap(),
+        )
+        .unwrap();
+        assert!(!h.run(true, mode).status.success());
+        assert_eq!(
+            fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+            "1"
+        );
+        assert_eq!(h.count(), 0);
+        let report: Value =
+            serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                .unwrap();
+        assert!(report["estimated_cost_usd"].is_null());
+        assert_eq!(report["pending_review_keys"].as_array().unwrap().len(), 2);
+        assert_eq!(report["failed_review_count"], 2);
+    }
+}
+
+#[test]
+fn completed_results_survive_call_limit_and_restart() {
+    let h = Harness::new();
+    let mut reviews: Vec<Value> =
+        serde_json::from_slice(&fs::read(h.dir.path().join("input.json")).unwrap()).unwrap();
+    let mut second = reviews[0].clone();
+    second["id"] = json!("r2");
+    reviews.push(second);
+    fs::write(
+        h.dir.path().join("input.json"),
+        serde_json::to_vec(&reviews).unwrap(),
+    )
+    .unwrap();
+    assert!(!h.run(true, "call-budget").status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "1"
+    );
+    assert_eq!(h.count(), 1);
+    let report: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap()).unwrap();
+    assert_eq!(report["pending_review_keys"], json!(["google:r2"]));
+    assert!(h.run(true, "normal").status.success());
+    assert_eq!(h.count(), 1);
+}
+
+#[test]
+fn effort_change_invalidates_analysis_but_keeps_receipts_and_cost_history() {
+    let h = Harness::new();
+    assert!(h.run(false, "normal").status.success());
+    assert!(h.run(false, "effort-high").status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "2"
+    );
+    assert_eq!(
+        fs::read_dir(h.dir.path().join("state/cost-history"))
+            .unwrap()
+            .count(),
+        1
+    );
+    assert!(h.run(true, "normal").status.success());
+    assert_eq!(h.count(), 1);
+    assert!(h.run(true, "effort-high").status.success());
+    assert_eq!(h.count(), 1);
 }

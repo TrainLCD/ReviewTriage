@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import time
+from cost_summary import summary as cost_summary
 
 PHASES = {
     "fetching": "レビュー取得", "preparing": "コード・Issue取得",
@@ -42,6 +43,7 @@ def main():
     log_path, progress_path, *command = sys.argv[1:]
     # Never display restored progress from a previous run.
     Path(progress_path).unlink(missing_ok=True)
+    started_wall = time.time()
     started = time.monotonic()
     with open(log_path, "wb") as log:
         child = subprocess.Popen(command, stdout=log, stderr=log, start_new_session=True)
@@ -61,6 +63,12 @@ def main():
             code = child.poll()
             if value != last or now - printed >= 30 or code is not None:
                 print(display(value, int(now - started)), flush=True)
+                try:
+                    cost_path = Path(progress_path).with_name("cost.json")
+                    cost = json.loads(cost_path.read_text()) if cost_path.stat().st_mtime >= started_wall else None
+                except (OSError, ValueError):
+                    cost = None
+                print(cost_summary(cost), flush=True)
                 last, printed = value, now
             if code is not None:
                 print("CLI終了: " + ("成功" if code == 0 else "失敗"), flush=True)
