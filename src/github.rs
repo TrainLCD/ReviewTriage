@@ -190,23 +190,73 @@ pub fn reference_details(
     Ok(out)
 }
 
-pub fn check_heads(snapshots: &[Snapshot]) -> Result<()> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceChange {
+    pub repository: String,
+    pub before: String,
+    pub after: String,
+    pub rules_only: bool,
+}
+
+// Compare immutable SHAs. Only a sole modification of the root rules file is
+// exempt: Codex runs with --ignore-rules. Unknown/truncated comparisons fail closed.
+pub fn compare_snapshot(snapshot: &Snapshot, current_sha: &str) -> Result<Option<SourceChange>> {
+    if snapshot.sha == current_sha {
+        return Ok(None);
+    }
+    let comparison = api(&format!(
+        "repos/{}/compare/{}...{}",
+        snapshot.repository, snapshot.sha, current_sha
+    ))?;
+    let rules_only = comparison["status"] == "ahead"
+        && comparison["files"].as_array().is_some_and(|files| {
+            files.len() == 1
+                && files[0]["filename"] == "AGENTS.md"
+                && files[0]["status"] == "modified"
+        });
+    Ok(Some(SourceChange {
+        repository: snapshot.repository.clone(),
+        before: snapshot.sha.clone(),
+        after: current_sha.to_owned(),
+        rules_only,
+    }))
+}
+
+pub fn source_changes(snapshots: &[Snapshot]) -> Result<Vec<SourceChange>> {
+    let mut changes = vec![];
     for s in snapshots {
-        let branch_encoded = reqwest::Url::parse("https://api.github.com/")?
+        let mut url = reqwest::Url::parse("https://api.github.com/")?
             .join(&format!("repos/{}/commits/", s.repository))?;
-        let mut url = branch_encoded;
         url.path_segments_mut()
             .map_err(|_| anyhow::anyhow!("invalid URL"))?
             .pop_if_empty()
             .push(&s.branch);
         let v = api(url.as_str())?;
-        ensure!(
-            v["sha"].as_str() == Some(&s.sha),
-            "{} changed during analysis; rerun before publishing",
-            s.repository
-        );
+        let sha = v["sha"].as_str().context("missing commit SHA")?;
+        if let Some(change) = compare_snapshot(s, sha)? {
+            changes.push(change);
+        }
     }
-    Ok(())
+    Ok(changes)
+}
+
+pub fn source_affected(finding: &crate::model::Finding, changes: &[SourceChange]) -> bool {
+    changes.iter().any(|change| {
+        if change.rules_only {
+            // A rule file explicitly cited as evidence is still a dependency.
+            return finding
+                .evidence
+                .iter()
+                .any(|e| e.repository == change.repository && e.path == "AGENTS.md");
+        }
+        // Do not infer safety from unchanged cited lines: implementation dependencies
+        // elsewhere in the same repository may have changed.
+        finding.repository == change.repository
+            || finding
+                .evidence
+                .iter()
+                .any(|e| e.repository == change.repository)
+    })
 }
 
 pub fn load_receipts(path: &Path) -> Result<std::collections::BTreeMap<String, String>> {

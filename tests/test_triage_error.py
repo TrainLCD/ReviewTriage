@@ -11,6 +11,59 @@ spec.loader.exec_module(diagnostics)
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_context_drift_is_identified_without_raw_output(self):
+        for error in ("Issues/PRs changed during analysis; rerun to check for duplicates",
+                      "TrainLCD/StationAPI changed during analysis; rerun before publishing",
+                      "Issue context changed; only affected reviews deferred, other validated reviews saved",
+                      "Source context changed; only affected reviews deferred, other validated reviews saved"):
+            self.assertNotIn("許可済み診断項目に該当しない", diagnostics.summarize("Error: " + error))
+
+    def test_partial_failure_retains_allowlisted_failure_reason(self):
+        event = {"type":"review_triage.batch_failed", "invalid_lines":0, "empty_explanations":0,
+                 "failure_code":"new issue has existing match"}
+        error = "\nError: some batches failed; validated reviews saved, failed reviews remain pending"
+        self.assertIn("新規判定に既存Issueの参照あり", diagnostics.summarize(json.dumps(event) + error))
+        event["failure_code"] = "PRIVATE REVIEW"
+        self.assertNotIn("PRIVATE REVIEW", diagnostics.summarize(json.dumps(event) + error))
+
+    def test_partial_failure_counts_only_failed_batches(self):
+        events = [
+            {"type":"review_triage.invalid_evidence", "problems":[{"supplied_line":999,"file_line_count":1}]},
+            {"type":"review_triage.batch_failed", "invalid_lines":2,"empty_explanations":1,"text":"PRIVATE REVIEW"},
+            {"type":"review_triage.batch_failed", "invalid_lines":3,"empty_explanations":0},
+        ]
+        message = diagnostics.summarize("\n".join(map(json.dumps, events)) + "\nError: some batches failed; validated reviews saved, failed reviews remain pending\n")
+        self.assertIn("行番号範囲外=5件", message)
+        self.assertIn("説明空欄=1件", message)
+        self.assertNotIn("PRIVATE REVIEW", message)
+
+    def test_all_failed_batches_aggregate_instead_of_last_invalid_evidence(self):
+        events = [
+            {"type": "review_triage.batch_failed",
+             "failure_code": "invalid evidence line", "invalid_lines": 2, "empty_explanations": 0},
+            {"type": "review_triage.invalid_evidence",
+             "problems": [{"supplied_line": 999, "file_line_count": 1, "empty_explanation": False}]},
+            {"type": "review_triage.batch_failed",
+             "failure_code": "invalid evidence line", "invalid_lines": 1, "empty_explanations": 3,
+             "private_review": "PRIVATE REVIEW"},
+        ]
+        log = "\n".join(map(json.dumps, events)) + "\nError: invalid evidence line\n"
+        result = diagnostics.summarize(log)
+        self.assertIn("行番号範囲外=3件", result)
+        self.assertIn("説明空欄=3件", result)
+        self.assertNotIn("PRIVATE REVIEW", result)
+
+    def test_evidence_diagnostics_disambiguate_without_echoing_model_text(self):
+        event = {"type": "review_triage.invalid_evidence", "problems": [
+            {"supplied_line": 999, "file_line_count": 1, "empty_explanation": False},
+            {"supplied_line": 1, "file_line_count": 1, "empty_explanation": True,
+             "path": "PRIVATE REVIEW", "explanation": "PRIVATE REVIEW"},
+        ]}
+        message = diagnostics.summarize(json.dumps(event) + "\nError: invalid evidence line\n")
+        self.assertIn("行番号範囲外=1件", message)
+        self.assertIn("説明空欄=1件", message)
+        self.assertNotIn("PRIVATE REVIEW", message)
+
     def test_sandbox_failure_has_fixed_diagnostic(self):
         for error in ("analysis sandbox failed; no issues published",
                       "analysis commands never succeeded; no issues published"):

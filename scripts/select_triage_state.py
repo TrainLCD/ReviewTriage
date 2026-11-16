@@ -51,14 +51,45 @@ def select_run(runs, current_id, jobs_for):
     return previous, stale
 
 
+def include_recovery(runs, requested, fetch):
+    if not requested:
+        return runs
+    if not requested.isascii() or not requested.isdecimal():
+        raise ValueError("Recovery run ID must contain ASCII digits only")
+    recovery_id = int(requested)
+    if any(run["id"] == recovery_id for run in runs):
+        return runs
+    recovery = fetch(recovery_id)
+    if recovery.get("id") != recovery_id:
+        raise RuntimeError("Recovery run ID mismatch")
+    # select_run still compares completion order and rejects unfinished writes;
+    # selecting an older recovery cannot roll back newer production state.
+    return [*runs, recovery]
+
+
+def workflow_runs_endpoint(repo, branch, workflow, event):
+    # Restrict which workflow can own the journal; never accept arbitrary API paths.
+    if workflow not in ("review-triage.yml", "complete-pr20-20261115.yml"):
+        raise ValueError("Unsupported state workflow")
+    if event not in ("workflow_dispatch", "push"):
+        raise ValueError("Unsupported state event")
+    branch = quote(branch, safe="")
+    return (f"repos/{repo}/actions/workflows/{workflow}/runs"
+            f"?branch={branch}&event={event}&per_page=100")
+
+
 def main():
     repo = os.environ["GITHUB_REPOSITORY"]
-    branch = quote(os.environ["GITHUB_REF_NAME"], safe="")
-    pages = api_pages(
-        f"repos/{repo}/actions/workflows/review-triage.yml/runs"
-        f"?branch={branch}&event=workflow_dispatch&per_page=100"
+    endpoint = workflow_runs_endpoint(
+        repo,
+        os.environ["GITHUB_REF_NAME"],
+        os.environ.get("STATE_WORKFLOW", "review-triage.yml"),
+        os.environ.get("STATE_EVENT", "workflow_dispatch"),
     )
+    pages = api_pages(endpoint)
     runs = [run for page in pages for run in page["workflow_runs"]]
+    runs = include_recovery(runs, os.environ.get("STATE_RUN_ID", ""), lambda run_id:
+        json.loads(subprocess.check_output(["gh", "api", f"repos/{repo}/actions/runs/{run_id}"], text=True)))
 
     def jobs_for(run_id):
         # Include all attempts so a rejected rerun cannot hide an earlier write.

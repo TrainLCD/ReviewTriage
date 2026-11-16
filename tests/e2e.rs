@@ -15,10 +15,10 @@ root=pathlib.Path(os.environ['MOCK_ROOT']); args=sys.argv[1:]; name=pathlib.Path
 issues_file=root/'issues.json'
 issues=json.loads(issues_file.read_text()) if issues_file.exists() else []
 mode=os.environ.get('MOCK_MODE','normal')
-if name=='git': print('a'*40)
+if name=='git': print(('b' if (root/'code-update').exists() and any('StationAPI' in a for a in args) else 'a')*40)
 elif name=='gh':
  if args[:2]==['repo','clone']:
-  d=pathlib.Path(args[3]); d.mkdir(); (d/'source.rs').write_text('fn main() {}\n')
+  d=pathlib.Path(args[3]); d.mkdir(); (d/'source.rs').write_text('fn main() {}\n'); (d/'AGENTS.md').write_text('rules\n')
  elif '--method' in args:
   payload=json.load(sys.stdin); repo=args[args.index('POST')+1].split('/issues')[0][6:]
   i={'number':len(issues)+1,'html_url':f'https://github.com/{repo}/issues/{len(issues)+1}','title':payload['title'],'body':payload['body'],'state':'open','updated_at':'2026-11-12T00:00:00Z','comments':0}
@@ -29,13 +29,14 @@ elif name=='gh':
   print(json.dumps(i))
  elif '--paginate' in args:
   endpoint=args[-1]
-  if '/comments?' in endpoint: print('[[]]')
+  if '/comments?' in endpoint: print('[[{"body":"changed"}]]' if (root/'comment-change').exists() and '/issues/1/' in endpoint else '[[]]')
   else:
    repo=endpoint.split('/issues')[0][6:]
    print('[[]]' if mode=='hidden-list' else json.dumps([[i for i in issues if f'/{repo}/' in i['html_url']]]))
  else:
   endpoint=args[-1]
-  if '/commits/' in endpoint: print(json.dumps({'sha':('b' if mode=='stale' else 'a')*40}))
+  if '/commits/' in endpoint: print(json.dumps({'sha':('b' if mode=='stale' or ('StationAPI' in endpoint and (mode in ['rules-update','rules-evidence','source-update','cross-source-update','source-new','shared-source-update','prior-cross-source-update'] or (root/'code-update').exists())) else 'a')*40}))
+  elif '/compare/' in endpoint: print(json.dumps({'status':'ahead','files':[{'filename':'AGENTS.md' if mode in ['rules-update','rules-evidence'] else 'source.rs','status':'modified'}]}))
   elif '/issues/' in endpoint: print('{}')
   else: print(json.dumps({'default_branch':'main'}))
 elif name=='codex':
@@ -64,9 +65,10 @@ elif name=='codex':
  calls=root/'codex-calls';calls.write_text(str(int(calls.read_text())+1 if calls.exists() else 1))
  prompt=sys.stdin.read()
  reviews=json.loads(prompt.split('REVIEWS (data): ')[-1])
+ with (root/'submitted.jsonl').open('a') as log: log.write(json.dumps([e['review']['id'] for e in reviews])+'\n')
  workspace=pathlib.Path(args[args.index('--cd')+1])
  known=json.loads((workspace/'github-context.json').read_text())
- if mode=='codex-failure':
+ if mode=='codex-failure' or (mode=='discussion-failure' and (workspace/'matched-discussions.json').exists()):
   print(json.dumps({'type':'turn.failed','error':{'message':'test provider failure'}}))
   sys.exit(42)
  if mode=='timeout':
@@ -105,8 +107,79 @@ elif name=='codex':
   field=mode[7:]
   if field=='explanation': findings[0]['evidence'][0][field]='ghp_not_a_real_secret'
   else: findings[0][field]='ghp_not_a_real_secret'
+ if mode in ['mixed','all-resolved','source-update','cross-source-update','mobile-resolved','source-new']:
+  for f,entry in zip(findings,reviews):
+   f['topic']='concern-'+entry['review']['id']; f['status']='resolved'; f['related_urls']=[]
+   if mode=='mixed' and entry['review']['id']=='r2': f['status']='uncertain'
+   if mode=='mobile-resolved' or (mode in ['source-update','cross-source-update','source-new'] and entry['review']['id']=='r2'):
+    f['repository']='TrainLCD/MobileApp'
+    if mode!='cross-source-update': f['evidence'][0]['repository']='TrainLCD/MobileApp'
+ if mode=='linked':
+  for f,entry in zip(findings,reviews): f['topic']='concern-'+entry['review']['id'];f['status']='existing';f['related_urls']=[known[int(entry['review']['id'][1:])-1]['url']]
+ if mode=='shared-resolved':
+  for f,entry in zip(findings,reviews): f['status']='resolved';f['related_urls']=[];f['reason']='Confirmed '+entry['review']['id']
+ if mode=='rules-evidence': findings[0]['evidence'][0]['path']='AGENTS.md'
+ if mode=='source-new':
+  for f in findings: f['status']='new'
+ if mode=='prior-cross-source-update':
+  f=findings[0]
+  f['topic']='cross-source-matched'
+  f['repository']='TrainLCD/MobileApp'
+  f['related_urls']=[]
+  f['status']='new' if reviews[0]['review']['id']=='r1' else 'existing'
+  f['evidence'][0]['repository']='TrainLCD/MobileApp' if f['status']=='new' else 'TrainLCD/StationAPI'
+ if mode=='grouped-new' and len(findings)>1:
+  findings[0]['review_keys']=[e['review_key'] for e in reviews];findings=findings[:1]
+ if mode=='shared-source-update' and len(findings)>1:
+  # r1 has a StationAPI-only resolved concern and shares an unpublished
+  # MobileApp new concern with r2. Only r1 is source-pending.
+  findings[0]['topic']='station-specific'
+  findings[0]['status']='resolved'
+  findings[0]['related_urls']=[]
+  findings[1]['topic']='shared-mobile-issue'
+  findings[1]['repository']='TrainLCD/MobileApp'
+  findings[1]['evidence'][0]['repository']='TrainLCD/MobileApp'
+  findings[1]['review_keys']=[e['review_key'] for e in reviews]
+ if mode in ['discussion-chain', 'discussion-overflow']:
+  n=int(calls.read_text())
+  findings[0]['status']='existing'
+  limit=6 if mode=='discussion-overflow' else 4
+  findings[0]['related_urls']=[known[min(n-1,limit)]['url']]
  if mode=='uncertain': findings[0]['status']='uncertain'
  if mode=='omitted': findings=[]
+ if mode=='issue-added':
+  for f in findings:
+   if f['review_keys']==['google:r2']: f['status']='resolved';f['topic']='other-concern'
+  if not issues:
+   issues_file.write_text(json.dumps([{'number':99,'html_url':'https://github.com/TrainLCD/StationAPI/issues/99','title':'別のIssue','body':'追加されたIssue','state':'open','updated_at':'2026-11-15T00:00:00Z','comments':0}]))
+ if mode=='partial-failure' and any(e['review']['id']=='r1' for e in reviews): findings=[]
+ if mode in ['new-match-once','new-match-always']:
+  if mode=='new-match-always' or int(calls.read_text())==1:
+   assert known
+   findings[0]['status']='new'
+  else:
+   assert 'Do not simply delete URLs' in prompt or (workspace/'matched-discussions.json').exists()
+ if mode=='dropped-match':
+  assert known
+  if (workspace/'matched-discussions.json').exists():
+   findings[0]['status']='existing'
+  else:
+   findings[0]['status']='new'
+   if int(calls.read_text())>1: findings[0]['related_urls']=[]
+ if mode=='shared-budget':
+  if int(calls.read_text()) in [1,2] or (workspace/'matched-discussions.json').exists():
+   findings[0]['evidence'][0]['line']=999
+ if mode in ['bad-line-once', 'bad-line-always', 'empty-explanation-once', 'multiple-evidence-once']:
+  if mode=='bad-line-always' or int(calls.read_text())==1:
+   evidence=findings[0]['evidence'][0]
+   if mode=='empty-explanation-once': evidence['explanation']='  '
+   else: evidence['line']=999
+   if mode=='multiple-evidence-once': findings[0]['evidence'].append(dict(evidence, line=0, explanation=''))
+  else:
+   assert 'REJECTED RESPONSE (untrusted data' in prompt
+   assert '"finding_index":0' in prompt and '"evidence_index":0' in prompt
+   assert '"file_line_count":1' in prompt
+   if mode=='multiple-evidence-once': assert '"evidence_index":1' in prompt
  if mode=='bad-evidence': findings[0]['evidence'][0]['path']='../github-context.json'
  if mode=='new-despite-marker': findings[0]['status']='new';findings[0]['related_urls']=[]
  pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps({'findings':findings}))
@@ -164,6 +237,15 @@ elif name=='codex':
             .env("MOCK_MODE", mode);
         if recheck {
             c.arg("--recheck");
+        }
+        if mode == "partial-failure"
+            || mode == "shared-resolved"
+            || mode == "prior-cross-source-update"
+        {
+            c.args(["--batch-size", "1"]);
+        }
+        if mode == "cached-only" {
+            c.arg("--cached-only");
         }
         if apply {
             c.arg("--apply");
@@ -245,7 +327,17 @@ fn uncertain_reviews_remain_pending_and_dry_run_does_not_mark_processed() {
     let h = Harness::new();
     assert!(h.run(false, "normal").status.success());
     assert!(!h.dir.path().join("state/processed.json").exists());
-    assert!(h.run(true, "uncertain").status.success());
+    assert!(!h.run(true, "recheck-uncertain").status.success());
+    assert_eq!(read_state(&h, "progress.json")["phase"], "partial");
+    assert_eq!(
+        read_state(&h, "report.json")["uncertain_review_keys"],
+        json!(["google:r1"])
+    );
+    assert_eq!(
+        read_state(&h, "report.json")["pending_review_keys"],
+        json!(["google:r1"])
+    );
+    assert_eq!(read_state(&h, "report.json")["processed_review_count"], 0);
     assert!(h.run(true, "normal").status.success());
     assert_eq!(h.count(), 1);
 }
@@ -257,7 +349,13 @@ fn credential_patterns_in_every_model_field_never_reach_github_or_report() {
         assert!(!o.status.success());
         assert_eq!(h.count(), 0);
         assert!(!String::from_utf8_lossy(&o.stderr).contains("ghp_not_a_real_secret"));
-        assert!(!h.dir.path().join("state/report.json").exists());
+        if h.dir.path().join("state/report.json").exists() {
+            let report: Value =
+                serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                    .unwrap();
+            assert!(report["findings"].as_array().unwrap().is_empty());
+            assert!(report["drafts"].as_array().unwrap().is_empty());
+        }
     }
 }
 
@@ -286,7 +384,7 @@ fn successful_posts_survive_interruption_and_missing_list_entries() {
 fn recheck_uncertain_removes_previous_processed_fingerprint() {
     let h = Harness::new();
     assert!(h.run(true, "normal").status.success());
-    assert!(h.run(true, "recheck-uncertain").status.success());
+    assert!(!h.run(true, "recheck-uncertain").status.success());
     let processed: Value =
         serde_json::from_slice(&fs::read(h.dir.path().join("state/processed.json")).unwrap())
             .unwrap();
@@ -304,7 +402,7 @@ fn recheck_uncertain_removes_previous_processed_fingerprint() {
 fn auth_refresh_persists_and_keyring_retains_native_storage_identity() {
     let h = Harness::new();
     for _ in 0..2 {
-        let o = h.run(false, "rotate-auth");
+        let o = h.run(false, "recheck-rotate-auth");
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     }
     assert_eq!(
@@ -396,7 +494,13 @@ fn persistent_duplicate_topics_stop_without_publishing() {
         fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
         "3"
     );
-    assert!(!h.dir.path().join("state/report.json").exists());
+    if h.dir.path().join("state/report.json").exists() {
+        let report: Value =
+            serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                .unwrap();
+        assert!(report["findings"].as_array().unwrap().is_empty());
+        assert!(report["drafts"].as_array().unwrap().is_empty());
+    }
 }
 
 #[test]
@@ -412,7 +516,13 @@ fn sandbox_failure_or_missing_execution_cannot_publish_or_mark_processed() {
         assert!(!output.status.success());
         assert!(!h.dir.path().join("issues.json").exists());
         assert!(!h.dir.path().join("state/processed.json").exists());
-        assert!(!h.dir.path().join("state/report.json").exists());
+        if h.dir.path().join("state/report.json").exists() {
+            let report: Value =
+                serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                    .unwrap();
+            assert!(report["findings"].as_array().unwrap().is_empty());
+            assert!(report["drafts"].as_array().unwrap().is_empty());
+        }
         // The same review remains eligible and succeeds on a healthy retry.
         let retry = h.run(true, "normal");
         assert!(
@@ -421,4 +531,751 @@ fn sandbox_failure_or_missing_execution_cannot_publish_or_mark_processed() {
             String::from_utf8_lossy(&retry.stderr)
         );
     }
+}
+
+#[test]
+fn invalid_evidence_is_repaired_before_apply_and_persistent_errors_never_publish() {
+    for mode in [
+        "bad-line-once",
+        "empty-explanation-once",
+        "multiple-evidence-once",
+    ] {
+        let h = Harness::new();
+        let output = h.run(true, mode);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+            "2"
+        );
+        let report: Value =
+            serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                .unwrap();
+        assert_eq!(report["findings"][0]["evidence"][0]["line"], 1);
+        assert_eq!(report["created_issues"].as_array().unwrap().len(), 1);
+    }
+    let h = Harness::new();
+    let output = h.run(true, "bad-line-always");
+    assert!(!output.status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "3"
+    );
+    assert!(!h.dir.path().join("issues.json").exists());
+    assert!(!h.dir.path().join("state/processed.json").exists());
+    if h.dir.path().join("state/report.json").exists() {
+        let report: Value =
+            serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                .unwrap();
+        assert!(report["findings"].as_array().unwrap().is_empty());
+        assert!(report["drafts"].as_array().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn failed_batch_does_not_discard_successful_reviews_and_retry_only_processes_pending() {
+    let h = Harness::new();
+    let mut reviews: Vec<Value> =
+        serde_json::from_slice(&fs::read(h.dir.path().join("input.json")).unwrap()).unwrap();
+    let mut second = reviews[0].clone();
+    second["id"] = json!("r2");
+    reviews.push(second);
+    fs::write(
+        h.dir.path().join("input.json"),
+        serde_json::to_vec(&reviews).unwrap(),
+    )
+    .unwrap();
+    let output = h.run(true, "partial-failure");
+    assert!(!output.status.success());
+    assert_eq!(h.count(), 1);
+    let report: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap()).unwrap();
+    assert_eq!(report["failed_review_count"], 1);
+    assert_eq!(report["review_count"], 2);
+    let progress: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/progress.json")).unwrap())
+            .unwrap();
+    assert_eq!(progress["phase"], "partial");
+    assert_eq!(progress["analyzed"], 1);
+    assert_eq!(progress["failed"], 1);
+    assert_eq!(progress["created"], 1);
+    let processed: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/processed.json")).unwrap())
+            .unwrap();
+    assert!(processed.get("google:r1").is_none());
+    assert!(processed.get("google:r2").is_some());
+    let retry = h.run(true, "normal");
+    assert!(
+        retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert_eq!(h.count(), 1);
+    let report: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap()).unwrap();
+    assert_eq!(report["review_count"], 1);
+    assert_eq!(report["failed_review_count"], 0);
+}
+
+#[test]
+fn new_with_existing_match_is_reassessed_without_duplicate_publication() {
+    for persistent in [false, true] {
+        let h = Harness::new();
+        assert!(h.run(true, "normal").status.success());
+        fs::remove_file(h.dir.path().join("codex-calls")).unwrap();
+        let output = h.run(
+            true,
+            if persistent {
+                "recheck-new-match-always"
+            } else {
+                "recheck-new-match-once"
+            },
+        );
+        assert_eq!(
+            output.status.success(),
+            !persistent,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(h.count(), 1);
+        let processed: Value =
+            serde_json::from_slice(&fs::read(h.dir.path().join("state/processed.json")).unwrap())
+                .unwrap();
+        assert_eq!(processed.get("google:r1").is_some(), !persistent);
+        if !persistent {
+            let report: Value =
+                serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                    .unwrap();
+            assert_eq!(report["findings"][0]["status"], "existing");
+            assert!(
+                !report["findings"][0]["related_urls"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[test]
+fn removed_candidate_is_still_inspected_and_repair_budget_is_shared() {
+    for mode in ["dropped-match", "shared-budget"] {
+        let h = Harness::new();
+        assert!(h.run(true, "normal").status.success());
+        fs::remove_file(h.dir.path().join("codex-calls")).unwrap();
+        let output = h.run(true, &format!("recheck-{mode}"));
+        assert_eq!(
+            output.status.success(),
+            mode == "dropped-match",
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(h.count(), 1);
+        let calls = fs::read_to_string(h.dir.path().join("codex-calls")).unwrap();
+        assert_eq!(calls, if mode == "dropped-match" { "3" } else { "4" });
+        if mode == "dropped-match" {
+            let report: Value =
+                serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap())
+                    .unwrap();
+            assert_eq!(report["findings"][0]["status"], "existing");
+        }
+    }
+}
+
+#[test]
+fn validated_checkpoint_reuses_analysis_and_cached_only_never_invokes_codex() {
+    let h = Harness::new();
+    assert!(h.run(false, "normal").status.success());
+    let before = fs::read_to_string(h.dir.path().join("codex-calls")).unwrap();
+    let output = h.run(true, "cached-only");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(h.count(), 1);
+    assert_eq!(
+        before,
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap()
+    );
+    // The created issue changed the input context: the old cache must not be reused.
+    fs::remove_file(h.dir.path().join("state/processed.json")).unwrap();
+    assert!(!h.run(true, "cached-only").status.success());
+    assert_eq!(
+        before,
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap()
+    );
+    let empty = Harness::new();
+    assert!(!empty.run(true, "cached-only").status.success());
+    assert!(!empty.dir.path().join("codex-calls").exists());
+}
+
+#[test]
+fn issue_addition_defers_new_candidate_but_saves_unaffected_reviews() {
+    let h = Harness::new();
+    let mut reviews: Vec<Value> =
+        serde_json::from_slice(&fs::read(h.dir.path().join("input.json")).unwrap()).unwrap();
+    let mut second = reviews[0].clone();
+    second["id"] = json!("r2");
+    reviews.push(second);
+    fs::write(
+        h.dir.path().join("input.json"),
+        serde_json::to_vec(&reviews).unwrap(),
+    )
+    .unwrap();
+    let output = h.run(true, "issue-added");
+    assert!(!output.status.success());
+    assert_eq!(h.count(), 1); // Only the independently added issue exists.
+    let processed: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/processed.json")).unwrap())
+            .unwrap();
+    assert!(processed.get("google:r1").is_none());
+    assert!(processed.get("google:r2").is_some());
+    let report: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap()).unwrap();
+    assert_eq!(
+        report["publication_pending_review_keys"],
+        json!(["google:r1"])
+    );
+    assert_eq!(report["created_issues"], json!([]));
+    assert!(h.run(true, "normal").status.success());
+    let report: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("state/report.json")).unwrap()).unwrap();
+    assert_eq!(report["review_count"], 1);
+    assert_eq!(h.count(), 1);
+}
+
+#[test]
+fn additional_discussion_passes_converge_without_ignoring_new_candidates() {
+    let h = Harness::new();
+    let issues: Vec<_> = (1..=5)
+        .map(|i| {
+            json!({
+                "number": i,
+                "html_url": format!("https://github.com/TrainLCD/StationAPI/issues/{i}"),
+                "title": format!("関連課題 {i}"),
+                "body": format!("同種の駅名課題 {i}"),
+                "state": "open",
+                "updated_at": "2026-11-12T00:00:00Z",
+                "comments": 0
+            })
+        })
+        .collect();
+    fs::write(
+        h.dir.path().join("issues.json"),
+        serde_json::to_vec(&issues).unwrap(),
+    )
+    .unwrap();
+    let output = h.run(true, "discussion-chain");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "6"
+    );
+    assert_eq!(h.count(), 5);
+    assert!(read_state(&h, "processed.json").get("google:r1").is_some());
+    assert!(h.run(true, "discussion-chain").status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "6"
+    );
+}
+
+#[test]
+fn discussion_limit_is_per_run_and_the_journal_survives_the_limit() {
+    let h = Harness::new();
+    let issues: Vec<_> = (1..=7)
+        .map(|i| {
+            json!({
+                "number": i,
+                "html_url": format!("https://github.com/TrainLCD/StationAPI/issues/{i}"),
+                "title": format!("関連課題 {i}"),
+                "body": format!("同種の駅名課題 {i}"),
+                "state": "open",
+                "updated_at": "2026-11-12T00:00:00Z",
+                "comments": 0
+            })
+        })
+        .collect();
+    fs::write(
+        h.dir.path().join("issues.json"),
+        serde_json::to_vec(&issues).unwrap(),
+    )
+    .unwrap();
+
+    let failed = h.run(true, "discussion-overflow");
+    assert!(!failed.status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "7"
+    );
+    assert_eq!(h.count(), 7);
+
+    let in_flight_dir = h.dir.path().join("state/analysis-in-flight");
+    let journals: Vec<_> = fs::read_dir(&in_flight_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(journals.len(), 1);
+    let stage: Value = serde_json::from_slice(&fs::read(&journals[0]).unwrap()).unwrap();
+    assert_eq!(stage["passes"], 6);
+
+    let retried = h.run(true, "discussion-overflow");
+    assert!(
+        retried.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retried.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "8"
+    );
+    assert_eq!(h.count(), 7);
+    assert!(read_state(&h, "processed.json").get("google:r1").is_some());
+    assert!(h.run(true, "discussion-overflow").status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "8"
+    );
+}
+
+#[test]
+fn failed_discussion_resumes_without_repeating_initial_analysis() {
+    for changed in [false, true] {
+        let h = Harness::new();
+        assert!(h.run(true, "normal").status.success());
+        fs::remove_file(h.dir.path().join("state/processed.json")).unwrap();
+        fs::remove_file(h.dir.path().join("codex-calls")).unwrap();
+        assert!(!h.run(true, "discussion-failure").status.success());
+        assert_eq!(
+            fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+            "2"
+        );
+        assert_eq!(h.count(), 1);
+        assert!(!h.run(true, "cached-only").status.success());
+        assert_eq!(
+            fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+            "2"
+        );
+        if changed {
+            let path = h.dir.path().join("issues.json");
+            let mut issues: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            issues[0]["body"] = json!("変更された内容");
+            fs::write(path, serde_json::to_vec(&issues).unwrap()).unwrap();
+        }
+        let output = h.run(true, "normal");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+            if changed { "4" } else { "3" }
+        );
+        assert_eq!(h.count(), 1);
+        let processed: Value =
+            serde_json::from_slice(&fs::read(h.dir.path().join("state/processed.json")).unwrap())
+                .unwrap();
+        assert!(processed.get("google:r1").is_some());
+    }
+}
+
+#[test]
+fn resumed_discussion_keeps_spent_repair_budget() {
+    let h = Harness::new();
+    assert!(h.run(true, "normal").status.success());
+    fs::remove_file(h.dir.path().join("codex-calls")).unwrap();
+    assert!(!h.run(true, "recheck-shared-budget").status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "4"
+    );
+    assert!(!h.run(true, "shared-budget").status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "5"
+    );
+    assert_eq!(h.count(), 1);
+}
+
+fn add_second_review(h: &Harness) {
+    let p = h.dir.path().join("input.json");
+    let mut rows: Vec<Value> = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+    let mut second = rows[0].clone();
+    second["id"] = json!("r2");
+    rows.push(second);
+    fs::write(p, serde_json::to_vec(&rows).unwrap()).unwrap();
+}
+fn read_state(h: &Harness, name: &str) -> Value {
+    serde_json::from_slice(&fs::read(h.dir.path().join("state").join(name)).unwrap()).unwrap()
+}
+#[test]
+fn rules_only_update_does_not_block_publication() {
+    let h = Harness::new();
+    let output = h.run(true, "rules-update");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(h.count(), 1);
+    assert!(read_state(&h, "processed.json").get("google:r1").is_some());
+    assert_eq!(
+        read_state(&h, "report.json")["source_changes"][0]["rules_only"],
+        true
+    );
+}
+#[test]
+fn source_update_defers_only_dependent_reviews_and_saves_other_results() {
+    for cross in [false, true] {
+        let h = Harness::new();
+        add_second_review(&h);
+        let output = h.run(
+            true,
+            if cross {
+                "cross-source-update"
+            } else {
+                "source-update"
+            },
+        );
+        assert!(!output.status.success());
+        let processed = read_state(&h, "processed.json");
+        assert!(processed.get("google:r1").is_none());
+        assert_eq!(processed.get("google:r2").is_some(), !cross);
+        let report = read_state(&h, "report.json");
+        assert_eq!(
+            report["source_pending_review_keys"]
+                .as_array()
+                .unwrap()
+                .len(),
+            if cross { 2 } else { 1 }
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("Source context changed; only affected reviews deferred")
+        );
+    }
+}
+#[test]
+fn merged_prior_new_finding_preserves_later_batch_source_dependencies() {
+    let h = Harness::new();
+    add_second_review(&h);
+    let output = h.run(true, "prior-cross-source-update");
+    assert!(
+        !output.status.success(),
+        "a changed cited source must defer publication"
+    );
+    assert_eq!(h.count(), 0, "the affected new issue must not be published");
+    let report = read_state(&h, "report.json");
+    let findings = report["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1, "the two batches should share one issue");
+    assert_eq!(findings[0]["review_keys"].as_array().unwrap().len(), 2);
+    let evidence = findings[0]["evidence"].as_array().unwrap();
+    assert!(
+        evidence
+            .iter()
+            .any(|e| e["repository"] == "TrainLCD/MobileApp")
+    );
+    assert!(
+        evidence
+            .iter()
+            .any(|e| e["repository"] == "TrainLCD/StationAPI")
+    );
+    let pending = report["source_pending_review_keys"].as_array().unwrap();
+    assert_eq!(pending.len(), 2);
+    assert!(pending.contains(&json!("google:r1")));
+    assert!(pending.contains(&json!("google:r2")));
+    assert_eq!(
+        report["publication_pending_review_keys"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let processed = read_state(&h, "processed.json");
+    assert!(processed.get("google:r1").is_none());
+    assert!(processed.get("google:r2").is_none());
+}
+
+#[test]
+fn shared_unpublished_finding_keeps_every_linked_review_pending() {
+    let h = Harness::new();
+    add_second_review(&h);
+    let output = h.run(true, "shared-source-update");
+    assert!(
+        !output.status.success(),
+        "source changes must keep both reviews pending"
+    );
+    assert_eq!(h.count(), 0, "the shared finding must not be published");
+    let processed = read_state(&h, "processed.json");
+    assert!(processed.get("google:r1").is_none());
+    assert!(processed.get("google:r2").is_none());
+    let report = read_state(&h, "report.json");
+    assert_eq!(report["source_pending_review_keys"], json!(["google:r1"]));
+    assert_eq!(
+        report["publication_pending_review_keys"],
+        json!(["google:r1", "google:r2"])
+    );
+}
+
+#[test]
+fn edited_legacy_review_cannot_reuse_an_old_analysis() {
+    for missing_fingerprints in [false, true] {
+        let h = Harness::new();
+        assert!(h.run(false, "all-resolved").status.success());
+        fs::remove_dir_all(h.dir.path().join("state/review-cache")).unwrap();
+        // Keep the completed legacy payload available to import_legacy, but
+        // prevent the independent, valid batch-checkpoint fallback from
+        // masking the migration-specific regression.
+        let cache_dir = h.dir.path().join("state/analysis-cache");
+        let checkpoint = fs::read_dir(&cache_dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::rename(checkpoint, cache_dir.join("legacy-only.json")).unwrap();
+        if missing_fingerprints {
+            let path = h.dir.path().join("state/report.json");
+            let mut report: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            report
+                .as_object_mut()
+                .unwrap()
+                .remove("review_fingerprints");
+            fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+        } else {
+            let path = h.dir.path().join("state/reviews.json");
+            let mut reviews: Vec<Value> =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            reviews[0]["text"] = json!("解析後に編集された本文");
+            reviews[0]["updated_at"] = json!("2026-11-12T00:00:00Z");
+            fs::write(&path, serde_json::to_vec(&reviews).unwrap()).unwrap();
+        }
+        let output = h.run(true, "cached-only");
+        assert!(!output.status.success());
+        assert_eq!(h.count(), 0);
+        assert_eq!(read_state(&h, "report.json")["reused_review_count"], 0);
+        assert_eq!(
+            read_state(&h, "report.json")["cache_rejections"]["no_definite_record"],
+            1
+        );
+    }
+}
+
+#[test]
+fn mixed_batch_reuses_definite_review_and_submits_only_pending_review() {
+    for legacy in [false, true] {
+        let h = Harness::new();
+        add_second_review(&h);
+        assert!(h.run(false, "mixed").status.success());
+        if legacy {
+            fs::remove_dir_all(h.dir.path().join("state/review-cache")).unwrap();
+        }
+        let output = h.run(true, "all-resolved");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let submitted = fs::read_to_string(h.dir.path().join("submitted.jsonl")).unwrap();
+        let rows: Vec<Value> = submitted
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(rows, vec![json!(["r1", "r2"]), json!(["r2"])]);
+        assert_eq!(read_state(&h, "report.json")["reused_review_count"], 1);
+        assert_eq!(
+            read_state(&h, "processed.json").as_object().unwrap().len(),
+            2
+        );
+    }
+}
+#[test]
+fn cached_only_saves_definite_part_of_mixed_batch_without_any_ai() {
+    let h = Harness::new();
+    add_second_review(&h);
+    assert!(h.run(false, "mixed").status.success());
+    assert!(!h.run(true, "cached-only").status.success());
+    assert_eq!(
+        read_state(&h, "report.json")["cache_rejections"]["no_definite_record"],
+        1
+    );
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "1"
+    );
+    assert!(read_state(&h, "processed.json").get("google:r1").is_some());
+    assert!(read_state(&h, "processed.json").get("google:r2").is_none());
+}
+#[test]
+fn review_cache_invalidates_only_related_repository_changes() {
+    for unrelated in [false, true] {
+        let h = Harness::new();
+        assert!(
+            h.run(
+                false,
+                if unrelated {
+                    "mobile-resolved"
+                } else {
+                    "all-resolved"
+                }
+            )
+            .status
+            .success()
+        );
+        fs::write(h.dir.path().join("code-update"), "yes").unwrap();
+        let output = h.run(true, "cached-only");
+        assert_eq!(
+            output.status.success(),
+            unrelated,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+            "1"
+        );
+    }
+}
+#[test]
+fn shared_new_finding_is_rejoined_without_duplicate_issue() {
+    let h = Harness::new();
+    add_second_review(&h);
+    assert!(h.run(false, "grouped-new").status.success());
+    let output = h.run(true, "cached-only");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(h.count(), 1);
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "1"
+    );
+    assert_eq!(
+        read_state(&h, "processed.json").as_object().unwrap().len(),
+        2
+    );
+}
+#[test]
+fn legacy_report_alone_cannot_authorize_a_result() {
+    let h = Harness::new();
+    assert!(h.run(false, "all-resolved").status.success());
+    fs::remove_dir_all(h.dir.path().join("state/review-cache")).unwrap();
+    fs::remove_dir_all(h.dir.path().join("state/analysis-cache")).unwrap();
+    assert!(!h.run(true, "cached-only").status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "1"
+    );
+}
+
+#[test]
+fn rules_file_cited_as_evidence_is_not_exempt_from_revalidation() {
+    let h = Harness::new();
+    assert!(!h.run(true, "rules-evidence").status.success());
+    assert_eq!(h.count(), 0);
+    assert!(read_state(&h, "processed.json").get("google:r1").is_none());
+}
+#[test]
+fn unaffected_new_issue_is_published_despite_other_repository_change() {
+    let h = Harness::new();
+    add_second_review(&h);
+    assert!(!h.run(true, "source-new").status.success());
+    assert_eq!(h.count(), 1);
+    let processed = read_state(&h, "processed.json");
+    assert!(processed.get("google:r1").is_none());
+    assert!(processed.get("google:r2").is_some());
+    let issues: Value =
+        serde_json::from_slice(&fs::read(h.dir.path().join("issues.json")).unwrap()).unwrap();
+    assert!(
+        issues[0]["html_url"]
+            .as_str()
+            .unwrap()
+            .contains("/MobileApp/")
+    );
+}
+
+#[test]
+fn distinct_definite_findings_for_same_topic_are_all_reused() {
+    let h = Harness::new();
+    add_second_review(&h);
+    assert!(h.run(false, "shared-resolved").status.success());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "2"
+    );
+    let output = h.run(true, "cached-only");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "2"
+    );
+    let report = read_state(&h, "report.json");
+    assert_eq!(report["reused_review_count"], 2);
+    assert_eq!(report["findings"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        read_state(&h, "processed.json").as_object().unwrap().len(),
+        2
+    );
+}
+
+#[test]
+fn discussion_change_invalidates_only_the_review_citing_it() {
+    let h = Harness::new();
+    assert!(h.run(true, "normal").status.success());
+    fs::remove_file(h.dir.path().join("state/processed.json")).unwrap();
+    let p = h.dir.path().join("issues.json");
+    let mut issues: Vec<Value> = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+    let mut second = issues[0].clone();
+    second["number"] = json!(2);
+    second["html_url"] = json!("https://github.com/TrainLCD/StationAPI/issues/2");
+    issues.push(second);
+    fs::write(p, serde_json::to_vec(&issues).unwrap()).unwrap();
+    add_second_review(&h);
+    assert!(h.run(false, "linked").status.success());
+    let calls = fs::read_to_string(h.dir.path().join("codex-calls")).unwrap();
+    fs::write(h.dir.path().join("comment-change"), "yes").unwrap();
+    assert!(!h.run(true, "cached-only").status.success());
+    assert_eq!(
+        calls,
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap()
+    );
+    assert_eq!(
+        read_state(&h, "report.json")["cache_rejections"]["discussion_changed"],
+        1
+    );
+    let processed = read_state(&h, "processed.json");
+    assert!(processed.get("google:r1").is_none());
+    assert!(processed.get("google:r2").is_some());
+}
+
+#[test]
+fn all_cache_misses_replace_the_old_report_with_current_failure_counts() {
+    let h = Harness::new();
+    assert!(h.run(false, "uncertain").status.success());
+    let output = h.run(true, "cached-only");
+    assert!(!output.status.success());
+    let report = read_state(&h, "report.json");
+    assert_eq!(report["failed_review_count"], 1);
+    assert_eq!(report["reused_review_count"], 0);
+    assert_eq!(report["cache_rejections"]["no_definite_record"], 1);
+    assert!(report["findings"].as_array().unwrap().is_empty());
+    assert_eq!(
+        fs::read_to_string(h.dir.path().join("codex-calls")).unwrap(),
+        "1"
+    );
 }
