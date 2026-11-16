@@ -1,5 +1,6 @@
 mod analysis;
 mod checkpoint;
+mod cost;
 mod github;
 mod http;
 mod model;
@@ -57,8 +58,8 @@ enum Action {
         apply: bool,
         #[arg(long,default_value_t=10,value_parser=clap::value_parser!(u16).range(1..=50))]
         batch_size: u16,
-        #[arg(long)]
-        model: Option<String>,
+        #[command(flatten)]
+        cost: cost::Options,
         #[arg(long,default_value_t=900,value_parser=clap::value_parser!(u64).range(1..))]
         timeout_seconds: u64,
     },
@@ -123,11 +124,13 @@ fn main() -> Result<()> {
             state_dir,
             apply,
             batch_size,
-            model,
+            cost,
             timeout_seconds,
             recheck,
             cached_only,
         } => {
+            cost.validate()?;
+            let model = Some(cost.cache_identity());
             fs::create_dir_all(&state_dir)?;
             let lock = OpenOptions::new()
                 .create(true)
@@ -138,6 +141,7 @@ fn main() -> Result<()> {
             lock.try_lock_exclusive()
                 .context("another run is using this state directory")?;
             let state_dir = state_dir.canonicalize()?;
+            let mut meter = cost::Meter::new(cost, state_dir.join("cost.json"))?;
             let mut progress = progress::Progress::new(state_dir.join("progress.json"));
             progress.save("fetching");
             let pending = state_dir.join("pending-issue.json");
@@ -179,6 +183,7 @@ fn main() -> Result<()> {
                 .collect();
             let report_path = state_dir.join("report.json");
             progress.total = reviews.len();
+            meter.set_review_count(reviews.len())?;
             progress.batches = reviews.len().div_ceil(usize::from(batch_size));
             progress.save("preparing");
             if reviews.is_empty() {
@@ -187,7 +192,7 @@ fn main() -> Result<()> {
                     &json!({"created_at":chrono::Utc::now(),"findings":[],"created_issues":[],"coverage":"Apple selected territory; Google last 7 days plus supplied CSV/cache",
                         "review_count":0,"cached_review_count":total_reviews,"processed_review_count":processed.len(),
                         "failed_review_count":0,"uncertain_review_keys":[],"pending_review_keys":[],
-                        "publication_pending_review_keys":[]}),
+                        "publication_pending_review_keys":[],"cost":meter.summary()}),
                 )?;
                 eprintln!(
                     "No new or edited text reviews to analyze (use --recheck to reanalyze processed reviews)."
@@ -257,7 +262,7 @@ fn main() -> Result<()> {
                         "no matching analysis checkpoint; Codex was not invoked"
                     );
                     let mut session =
-                        analysis::BatchAnalysis::new(model.as_deref(), timeout_seconds);
+                        analysis::BatchAnalysis::new(timeout_seconds, index + 1, &mut meter);
                     let in_flight_path = state_dir
                         .join("analysis-in-flight")
                         .join(format!("{key}.json"));
@@ -312,6 +317,7 @@ fn main() -> Result<()> {
                         let details = github::reference_details(&issues, &session.candidate_urls)?;
                         let inspected = session.candidate_urls.clone();
                         atomic_json(&workspace.path().join("matched-discussions.json"), &details)?;
+                        session.reason = "discussion";
                         let result = analysis::analyze(
                             workspace.path(),
                             batch,
@@ -384,6 +390,16 @@ fn main() -> Result<()> {
                         }
                         progress.failed += batch.len();
                         progress.save("analyzing");
+                        if meter.stop_reason.is_some() {
+                            failed_keys.extend(
+                                remaining
+                                    .iter()
+                                    .skip((index + 1) * usize::from(batch_size))
+                                    .map(Review::key),
+                            );
+                            progress.failed = failed_keys.len();
+                            break;
+                        }
                         continue;
                     }
                 };
@@ -436,6 +452,19 @@ fn main() -> Result<()> {
                 .collect();
             let mut report = json!({"created_at":chrono::Utc::now(),"coverage":"Apple selected territory; Google last 7 days plus supplied CSV/cache. Google API does not expose country.",
                 "snapshots":snapshots,"review_fingerprints":review_fingerprints,"review_count":reviews.len(),"cached_review_count":total_reviews,"failed_review_count":failed_keys.len(),"reused_review_count":reused.len(),"cache_rejections":cache_rejections,"batch_failures":batch_failures,"findings":findings,"drafts":drafts,"created_issues":[],"apply":apply});
+            report["analysis_identity"] = json!(model);
+            report["cost"] = meter.summary();
+            for field in [
+                "estimated_cost_usd",
+                "usage_by_model",
+                "codex_invocations",
+                "calls_per_review",
+                "cache_hit_rate",
+                "retries_by_reason",
+            ] {
+                report[field] = report["cost"][field].clone();
+            }
+            report["pending_review_keys"] = json!(failed_keys);
             atomic_json(&report_path, &report)?;
             // Always replace a previous run's report, including an all-failed
             // cached-only run, so stale success counts cannot masquerade as results.
@@ -612,8 +641,17 @@ fn main() -> Result<()> {
                     " (dry-run; use --apply to create issues)"
                 }
             );
+            // An exhausted admission budget is not a failure if the final
+            // successful call left no deferred, uncertain or failed reviews.
+            let budget_reached_after_completion = meter.stop_reason
+                == Some("run cost admission limit reached")
+                && pending_review_keys.is_empty()
+                && batch_failures.is_empty();
+            let guard_stopped_work =
+                meter.stop_reason.is_some() && !budget_reached_after_completion;
             progress.save(
-                if batch_failures.is_empty()
+                if !guard_stopped_work
+                    && batch_failures.is_empty()
                     && publication_pending.is_empty()
                     && uncertain_keys.is_empty()
                 {
@@ -621,6 +659,10 @@ fn main() -> Result<()> {
                 } else {
                     "partial"
                 },
+            );
+            ensure!(
+                !guard_stopped_work,
+                "AI run stopped by cost/usage guard; validated reviews saved"
             );
             ensure!(
                 batch_failures.is_empty(),

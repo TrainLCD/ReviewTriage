@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 SCRIPT = Path(__file__).parents[1] / "scripts/run_triage.py"
+sys.path.insert(0, str(SCRIPT.parent))
 spec = importlib.util.spec_from_file_location("progress", SCRIPT)
 progress = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(progress)

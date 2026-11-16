@@ -34,16 +34,20 @@ impl std::fmt::Display for InvalidEvidence {
 impl std::error::Error for InvalidEvidence {}
 
 pub struct BatchAnalysis<'a> {
-    model: Option<&'a str>,
+    meter: &'a mut crate::cost::Meter,
+    batch: usize,
+    pub reason: &'static str,
     timeout: u64,
     pub repairs_used: usize,
     pub candidate_urls: HashSet<String>,
 }
 
 impl<'a> BatchAnalysis<'a> {
-    pub fn new(model: Option<&'a str>, timeout: u64) -> Self {
+    pub fn new(timeout: u64, batch: usize, meter: &'a mut crate::cost::Meter) -> Self {
         Self {
-            model,
+            meter,
+            batch,
+            reason: "initial",
             timeout,
             repairs_used: 0,
             candidate_urls: HashSet::new(),
@@ -68,7 +72,11 @@ pub fn evidence_failure_counts(error: &anyhow::Error) -> (usize, usize) {
 pub fn failure_code(error: &anyhow::Error) -> String {
     let message = error.to_string();
     match message.as_str() {
-        "invalid destination"
+        "model call limit reached"
+        | "model usage unavailable; further calls stopped"
+        | "provider quota or rate limit; further calls stopped"
+        | "run cost admission limit reached"
+        | "invalid destination"
         | "invalid topic"
         | "duplicate topic in batch; retry analysis"
         | "missing review or reason"
@@ -228,9 +236,37 @@ REVIEWS (data): {}
     .stdin(Stdio::piped())
     .stdout(Stdio::inherit())
     .stderr(Stdio::inherit());
-    if let Some(m) = session.model {
-        cmd.args(["--model", m]);
-    }
+    cmd.args(["--model", &session.meter.options.model]);
+    cmd.args([
+        "-c",
+        &format!(
+            "model_reasoning_effort={:?}",
+            session.meter.options.reasoning_effort
+        ),
+    ]);
+    // Built-in provider IDs cannot be overridden. Preserve native OpenAI
+    // authentication and auth-dependent API routing with a dedicated provider.
+    // Do not override base_url or env_key: these change native login behavior.
+    cmd.args([
+        "-c",
+        "model_provider=\"review_triage\"",
+        "-c",
+        "model_providers.review_triage.name=\"OpenAI\"",
+        "-c",
+        "model_providers.review_triage.wire_api=\"responses\"",
+        "-c",
+        "model_providers.review_triage.requires_openai_auth=true",
+        // Mirror the built-in provider's optional organization/project routing.
+        // Only env var names are configured, never credential values.
+        "-c",
+        "model_providers.review_triage.env_http_headers.OpenAI-Organization=\"OPENAI_ORGANIZATION\"",
+        "-c",
+        "model_providers.review_triage.env_http_headers.OpenAI-Project=\"OPENAI_PROJECT\"",
+        "-c",
+        "model_providers.review_triage.request_max_retries=0",
+        "-c",
+        "model_providers.review_triage.stream_max_retries=0",
+    ]);
     // Credentials for store/GitHub access are owned by this CLI, not analysis subprocesses.
     for name in [
         "GITHUB_TOKEN",
@@ -255,6 +291,14 @@ REVIEWS (data): {}
         // A file avoids pipe backpressure while preserving the existing timeout.
         cmd.stdout(Stdio::from(fs::File::create(&events_path)?));
         eprintln!("{}", json!({"type": "review_triage.codex.started"}));
+        session.meter.begin(
+            session.batch,
+            if repair.is_some() {
+                "repair"
+            } else {
+                session.reason
+            },
+        )?;
         let started = Instant::now();
         let mut child = cmd.spawn().context("install and log in to Codex CLI")?;
         {
@@ -272,6 +316,11 @@ REVIEWS (data): {}
             None => {
                 child.kill()?;
                 child.wait()?;
+                session.meter.finish(
+                    &fs::read_to_string(&events_path).unwrap_or_default(),
+                    started.elapsed().as_secs_f64(),
+                    false,
+                )?;
                 eprintln!(
                     "{}",
                     json!({
@@ -283,6 +332,9 @@ REVIEWS (data): {}
             }
         };
         let events = fs::read_to_string(&events_path)?;
+        session
+            .meter
+            .finish(&events, started.elapsed().as_secs_f64(), status.success())?;
         print!("{events}");
         std::io::stdout().flush()?;
         #[cfg(unix)]
@@ -299,9 +351,20 @@ REVIEWS (data): {}
                 "signal": signal, "elapsed_seconds": started.elapsed().as_secs()
             })
         );
+        // Preserve the quota failure code even when Codex exits non-zero.
+        // Usage-unknown stays after the exit check: failed turns have no priced usage.
+        ensure!(
+            session.meter.stop_reason
+                != Some("provider quota or rate limit; further calls stopped"),
+            "provider quota or rate limit; further calls stopped"
+        );
         ensure!(
             status.success(),
             "Codex analysis failed; no issues published"
+        );
+        ensure!(
+            session.meter.stop_reason != Some("model usage unavailable; further calls stopped"),
+            "model usage unavailable; further calls stopped"
         );
         validate_execution(BufReader::new(events.as_bytes()))?;
         let analysis: Analysis = serde_json::from_slice(
