@@ -256,6 +256,12 @@ REVIEWS (data): {}
         "model_providers.review_triage.wire_api=\"responses\"",
         "-c",
         "model_providers.review_triage.requires_openai_auth=true",
+        // Mirror the built-in provider's optional organization/project routing.
+        // Only env var names are configured, never credential values.
+        "-c",
+        "model_providers.review_triage.env_http_headers.OpenAI-Organization=\"OPENAI_ORGANIZATION\"",
+        "-c",
+        "model_providers.review_triage.env_http_headers.OpenAI-Project=\"OPENAI_PROJECT\"",
         "-c",
         "model_providers.review_triage.request_max_retries=0",
         "-c",

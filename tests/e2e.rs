@@ -49,6 +49,8 @@ elif name=='codex':
  assert 'model_providers.review_triage.name="OpenAI"' in args
  assert 'model_providers.review_triage.wire_api="responses"' in args
  assert 'model_providers.review_triage.requires_openai_auth=true' in args
+ assert 'model_providers.review_triage.env_http_headers.OpenAI-Organization="OPENAI_ORGANIZATION"' in args
+ assert 'model_providers.review_triage.env_http_headers.OpenAI-Project="OPENAI_PROJECT"' in args
  assert 'model_providers.review_triage.request_max_retries=0' in args
  assert 'model_providers.review_triage.stream_max_retries=0' in args
  assert not any(a.startswith('model_providers.openai.') for a in args)
@@ -72,6 +74,9 @@ elif name=='codex':
  assert 'GH_TOKEN' not in os.environ
  assert 'CODEX_REFRESH_TOKEN_URL_OVERRIDE' not in os.environ
  assert 'CODEX_REVOKE_TOKEN_URL_OVERRIDE' not in os.environ
+ if mode=='provider-headers':
+  assert os.environ['OPENAI_ORGANIZATION']=='org-test'
+  assert os.environ['OPENAI_PROJECT']=='proj-test'
  calls=root/'codex-calls';calls.write_text(str(int(calls.read_text())+1 if calls.exists() else 1))
  prompt=sys.stdin.read()
  reviews=json.loads(prompt.split('REVIEWS (data): ')[-1])
@@ -262,6 +267,10 @@ elif name=='codex':
         if mode == "effort-high" {
             c.args(["--reasoning-effort", "high"]);
         }
+        if mode == "provider-headers" {
+            c.env("OPENAI_ORGANIZATION", "org-test")
+                .env("OPENAI_PROJECT", "proj-test");
+        }
         if mode == "call-budget" {
             c.args(["--max-model-calls", "1", "--batch-size", "1"]);
         }
@@ -289,6 +298,17 @@ elif name=='codex':
             .unwrap_or(0)
     }
 }
+#[test]
+fn custom_provider_preserves_optional_organization_and_project_environment() {
+    let h = Harness::new();
+    let output = h.run(false, "provider-headers");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn dry_run_then_apply_then_rerun_does_not_duplicate() {
     let h = Harness::new();

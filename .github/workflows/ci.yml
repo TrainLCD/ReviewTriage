@@ -34,6 +34,8 @@ jobs:
             -c 'model_providers.review_triage.name="OpenAI"' \
             -c 'model_providers.review_triage.wire_api="responses"' \
             -c 'model_providers.review_triage.requires_openai_auth=true' \
+            -c 'model_providers.review_triage.env_http_headers.OpenAI-Organization="OPENAI_ORGANIZATION"' \
+            -c 'model_providers.review_triage.env_http_headers.OpenAI-Project="OPENAI_PROJECT"' \
             -c 'model_providers.review_triage.request_max_retries=0' \
             -c 'model_providers.review_triage.stream_max_retries=0' \
             -c shell_environment_policy.inherit=none \
