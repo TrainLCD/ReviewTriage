@@ -26,5 +26,16 @@ jobs:
           node-version: '22'
       - run: sudo apt-get update && sudo apt-get install --yes bubblewrap
       - run: npm install --global @openai/codex@0.169.0
-      - name: Verify read-only sandbox without API credentials
-        run: timeout 30s codex sandbox -c 'sandbox_mode="read-only"' -c shell_environment_policy.inherit=none -c "shell_environment_policy.set.PATH=\"$PATH\"" -- /bin/cat Cargo.toml > /dev/null
+      - name: Verify read-only sandbox and retry-free provider config (Codex 0.169.0)
+        run: |
+          timeout 30s codex sandbox \
+            -c 'sandbox_mode="read-only"' \
+            -c 'model_provider="review_triage"' \
+            -c 'model_providers.review_triage.name="OpenAI"' \
+            -c 'model_providers.review_triage.wire_api="responses"' \
+            -c 'model_providers.review_triage.requires_openai_auth=true' \
+            -c 'model_providers.review_triage.request_max_retries=0' \
+            -c 'model_providers.review_triage.stream_max_retries=0' \
+            -c shell_environment_policy.inherit=none \
+            -c "shell_environment_policy.set.PATH=\"$PATH\"" \
+            -- /bin/cat Cargo.toml > /dev/null

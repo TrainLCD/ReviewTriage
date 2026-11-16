@@ -641,8 +641,16 @@ fn main() -> Result<()> {
                     " (dry-run; use --apply to create issues)"
                 }
             );
+            // An exhausted admission budget is not a failure if the final
+            // successful call left no deferred, uncertain or failed reviews.
+            let budget_reached_after_completion = meter.stop_reason
+                == Some("run cost admission limit reached")
+                && pending_review_keys.is_empty()
+                && batch_failures.is_empty();
+            let guard_stopped_work =
+                meter.stop_reason.is_some() && !budget_reached_after_completion;
             progress.save(
-                if meter.stop_reason.is_none()
+                if !guard_stopped_work
                     && batch_failures.is_empty()
                     && publication_pending.is_empty()
                     && uncertain_keys.is_empty()
@@ -653,7 +661,7 @@ fn main() -> Result<()> {
                 },
             );
             ensure!(
-                meter.stop_reason.is_none(),
+                !guard_stopped_work,
                 "AI run stopped by cost/usage guard; validated reviews saved"
             );
             ensure!(

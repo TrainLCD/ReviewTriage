@@ -45,6 +45,15 @@ elif name=='codex':
  codex_home=pathlib.Path(os.environ['CODEX_HOME'])
  assert codex_home == root/'original-codex'
  assert '--model' in args and any(a.startswith('model_reasoning_effort=') for a in args)
+ assert 'model_provider="review_triage"' in args
+ assert 'model_providers.review_triage.name="OpenAI"' in args
+ assert 'model_providers.review_triage.wire_api="responses"' in args
+ assert 'model_providers.review_triage.requires_openai_auth=true' in args
+ assert 'model_providers.review_triage.request_max_retries=0' in args
+ assert 'model_providers.review_triage.stream_max_retries=0' in args
+ assert not any(a.startswith('model_providers.openai.') for a in args)
+ assert not any(a.startswith('model_providers.review_triage.base_url=') for a in args)
+ assert not any(a.startswith('model_providers.review_triage.env_key=') for a in args)
  assert '--ignore-user-config' in args and '--ignore-rules' in args and '--json' in args
  store=next(a for a in args if a.startswith('cli_auth_credentials_store='))
  if mode=='keyring':
@@ -185,7 +194,9 @@ elif name=='codex':
    if mode=='multiple-evidence-once': assert '"evidence_index":1' in prompt
  if mode=='bad-evidence': findings[0]['evidence'][0]['path']='../github-context.json'
  if mode=='new-despite-marker': findings[0]['status']='new';findings[0]['related_urls']=[]
- if mode!='missing-usage': print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1000,'cached_input_tokens':500,'output_tokens':100,'reasoning_output_tokens':50}}))
+ if mode!='missing-usage':
+  tokens={'input_tokens':2000000,'cached_input_tokens':0,'output_tokens':0,'reasoning_output_tokens':0} if mode=='budget-at-last-call' else {'input_tokens':1000,'cached_input_tokens':500,'output_tokens':100,'reasoning_output_tokens':50}
+  print(json.dumps({'type':'turn.completed','usage':tokens}))
  pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps({'findings':findings}))
 "#;
         for name in ["gh", "git", "codex"] {
@@ -256,6 +267,9 @@ elif name=='codex':
         }
         if mode == "cost-budget" {
             c.args(["--max-run-cost-usd", "0.5"]);
+        }
+        if mode == "budget-at-last-call" {
+            c.args(["--max-run-cost-usd", "1", "--call-cost-reserve-usd", "0.5"]);
         }
         if mode == "quota" || mode == "missing-usage" {
             c.args(["--batch-size", "1"]);
@@ -1335,7 +1349,31 @@ fn unknown_usage_and_quota_stop_all_remaining_batches() {
         assert!(report["estimated_cost_usd"].is_null());
         assert_eq!(report["pending_review_keys"].as_array().unwrap().len(), 2);
         assert_eq!(report["failed_review_count"], 2);
+        let expected = if mode == "quota" {
+            "provider quota or rate limit; further calls stopped"
+        } else {
+            "model usage unavailable; further calls stopped"
+        };
+        assert_eq!(report["batch_failures"][0]["failure_code"], expected);
     }
+}
+
+#[test]
+fn reaching_budget_on_final_successful_call_is_complete() {
+    let h = Harness::new();
+    let output = h.run(true, "budget-at-last-call");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(h.count(), 1);
+    assert_eq!(read_state(&h, "progress.json")["phase"], "complete");
+    assert_eq!(read_state(&h, "report.json")["pending_review_keys"], json!([]));
+    assert_eq!(
+        read_state(&h, "report.json")["cost"]["stop_reason"],
+        "run cost admission limit reached"
+    );
 }
 
 #[test]

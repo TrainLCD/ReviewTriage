@@ -244,12 +244,22 @@ REVIEWS (data): {}
             session.meter.options.reasoning_effort
         ),
     ]);
-    // Disable provider retries: quota/429 must not fan out into repeated calls.
+    // Built-in provider IDs cannot be overridden. Preserve native OpenAI
+    // authentication and auth-dependent API routing with a dedicated provider.
+    // Do not override base_url or env_key: these change native login behavior.
     cmd.args([
         "-c",
-        "model_providers.openai.request_max_retries=0",
+        "model_provider=\"review_triage\"",
         "-c",
-        "model_providers.openai.stream_max_retries=0",
+        "model_providers.review_triage.name=\"OpenAI\"",
+        "-c",
+        "model_providers.review_triage.wire_api=\"responses\"",
+        "-c",
+        "model_providers.review_triage.requires_openai_auth=true",
+        "-c",
+        "model_providers.review_triage.request_max_retries=0",
+        "-c",
+        "model_providers.review_triage.stream_max_retries=0",
     ]);
     // Credentials for store/GitHub access are owned by this CLI, not analysis subprocesses.
     for name in [
@@ -335,6 +345,13 @@ REVIEWS (data): {}
                 "signal": signal, "elapsed_seconds": started.elapsed().as_secs()
             })
         );
+        // Preserve the quota failure code even when Codex exits non-zero.
+        // Usage-unknown stays after the exit check: failed turns have no priced usage.
+        ensure!(
+            session.meter.stop_reason
+                != Some("provider quota or rate limit; further calls stopped"),
+            "provider quota or rate limit; further calls stopped"
+        );
         ensure!(
             status.success(),
             "Codex analysis failed; no issues published"
@@ -342,11 +359,6 @@ REVIEWS (data): {}
         ensure!(
             session.meter.stop_reason != Some("model usage unavailable; further calls stopped"),
             "model usage unavailable; further calls stopped"
-        );
-        ensure!(
-            session.meter.stop_reason
-                != Some("provider quota or rate limit; further calls stopped"),
-            "provider quota or rate limit; further calls stopped"
         );
         validate_execution(BufReader::new(events.as_bytes()))?;
         let analysis: Analysis = serde_json::from_slice(
