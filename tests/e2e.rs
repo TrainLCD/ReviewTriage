@@ -1369,7 +1369,10 @@ fn reaching_budget_on_final_successful_call_is_complete() {
     );
     assert_eq!(h.count(), 1);
     assert_eq!(read_state(&h, "progress.json")["phase"], "complete");
-    assert_eq!(read_state(&h, "report.json")["pending_review_keys"], json!([]));
+    assert_eq!(
+        read_state(&h, "report.json")["pending_review_keys"],
+        json!([])
+    );
     assert_eq!(
         read_state(&h, "report.json")["cost"]["stop_reason"],
         "run cost admission limit reached"
